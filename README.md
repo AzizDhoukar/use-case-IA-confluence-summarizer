@@ -66,7 +66,17 @@ ATLASSIAN_API_TOKEN=...
 
 `config.yaml`: the essentials are
 
-- `spaces`: space keys to analyze (start with your test space)
+- `spaces`: space keys to analyze (start with your test space). Use the **key** from the
+  space URL (`/wiki/spaces/<KEY>/...`), quoted; personal space keys start with `~`.
+  To analyze only part of a space, give page subtrees (page ID or exact title; each selects
+  the page and all its descendants):
+
+  ```yaml
+  spaces:
+    - key: "CDP"
+      include_pages: ["Espace Team PO/CPO", "1590099999"]
+      exclude_pages: ["Archives"]
+  ```
 - `report.space` and `report.parent_id` or `report.parent_title`: where report pages go
   (create the parent page first, e.g. "Documentation Health")
 - `exclude_spaces` / `exclude_labels`: content that must never be sent to Claude
@@ -83,6 +93,7 @@ Always start with a dry run on a test space. Reads from Confluence are real; the
 page is written to `output/dry-run/<timestamp>/` instead of Confluence.
 
 ```bash
+source .venv/bin/activate        # once per terminal; otherwise: dochealth: command not found
 dochealth run-all --dry-run --space TEST
 ```
 
@@ -105,6 +116,8 @@ When you are happy with it, drop `--dry-run` to publish the report page.
 | `dochealth duplicates`, `tune-threshold`, `changes` | Phases 2 and 3 (not built yet) |
 
 Common options: `--dry-run`, `--config PATH`, `--space KEY` (repeatable, overrides config),
+`--page ID_OR_TITLE` / `--exclude-page ID_OR_TITLE` (repeatable, with a single `--space`:
+only that page subtree),
 `--max-llm-calls N`, `-v`.
 
 Exit codes: `0` ok, `1` error, `2` configuration error, `75` Claude usage limit reached
