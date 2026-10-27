@@ -1,0 +1,114 @@
+"""Confluence Cloud client.
+
+Deliberately read-mostly: the only write operations are creating a new page (the report)
+and adding footer comments. There is no code to edit, move, archive or delete pages.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Iterator
+
+from .http import AtlassianError, AtlassianHTTP
+
+log = logging.getLogger(__name__)
+
+# Statuses meaning "analytics not available on this site/plan" rather than a real error.
+ANALYTICS_UNAVAILABLE = (400, 403, 404, 405, 501)
+
+
+@dataclass
+class Page:
+    id: str
+    space_key: str
+    space_id: str
+    title: str
+    url: str
+    parent_id: str | None
+    author_id: str | None
+    owner_id: str | None
+    last_modifier_id: str | None
+    created_at: str | None
+    modified_at: str | None
+    version: int
+    body_storage: str
+    labels: list[str] = field(default_factory=list)
+
+
+class Confluence:
+    def __init__(self, http: AtlassianHTTP):
+        self.http = http
+
+    @property
+    def wiki_base(self) -> str:
+        return self.http.site_url + "/wiki"
+
+    # --- reading ---------------------------------------------------------
+    def get_space(self, key: str) -> dict:
+        data = self.http.get_json("/wiki/api/v2/spaces", {"keys": key})
+        results = data.get("results", [])
+        if not results:
+            raise AtlassianError(f"Space '{key}' not found or not accessible with this token")
+        return results[0]
+
+    def iter_pages(self, space_key: str, space_id: str, page_size: int = 100) -> Iterator[Page]:
+        params = {"body-format": "storage", "limit": page_size, "status": "current"}
+        for item in self.http.paginate(f"/wiki/api/v2/spaces/{space_id}/pages", params):
+            version = item.get("version") or {}
+            body = ((item.get("body") or {}).get("storage") or {}).get("value", "")
+            webui = (item.get("_links") or {}).get("webui", "")
+            yield Page(
+                id=str(item["id"]),
+                space_key=space_key,
+                space_id=str(space_id),
+                title=item.get("title", ""),
+                url=self.wiki_base + webui if webui else "",
+                parent_id=str(item["parentId"]) if item.get("parentId") else None,
+                author_id=item.get("authorId"),
+                owner_id=item.get("ownerId"),
+                last_modifier_id=version.get("authorId"),
+                created_at=item.get("createdAt"),
+                modified_at=version.get("createdAt"),
+                version=int(version.get("number", 0)),
+                body_storage=body,
+            )
+
+    def get_labels(self, page_id: str) -> list[str]:
+        return [lab["name"] for lab in
+                self.http.paginate(f"/wiki/api/v2/pages/{page_id}/labels", {"limit": 250})]
+
+    def get_users(self, account_ids: list[str]) -> list[dict]:
+        out: list[dict] = []
+        for i in range(0, len(account_ids), 50):
+            data = self.http.post_json("/wiki/api/v2/users-bulk",
+                                       {"accountIds": account_ids[i:i + 50]})
+            out.extend(data.get("results", []))
+        return out
+
+    def page_views(self, page_id: str, from_date: str) -> int | None:
+        """Total views since from_date (YYYY-MM-DD), or None if analytics is unavailable."""
+        resp = self.http.request("GET", f"/wiki/rest/api/analytics/content/{page_id}/views",
+                                 params={"fromDate": from_date},
+                                 ok_statuses=ANALYTICS_UNAVAILABLE)
+        if resp.status_code >= 400:
+            log.info("Analytics unavailable (HTTP %s)", resp.status_code)
+            return None
+        return int(resp.json().get("count", 0))
+
+    def find_page(self, space_id: str, title: str) -> dict | None:
+        data = self.http.get_json("/wiki/api/v2/pages",
+                                  {"space-id": space_id, "title": title, "status": "current"})
+        results = data.get("results", [])
+        return results[0] if results else None
+
+    # --- writing (new content only) ---------------------------------------
+    def create_page(self, space_id: str, parent_id: str | None, title: str, storage: str) -> dict:
+        body = {"spaceId": space_id, "status": "current", "title": title,
+                "body": {"representation": "storage", "value": storage}}
+        if parent_id:
+            body["parentId"] = parent_id
+        page = self.http.post_json("/wiki/api/v2/pages", body)
+        webui = (page.get("_links") or {}).get("webui", "")
+        page["url"] = self.wiki_base + webui if webui else ""
+        return page

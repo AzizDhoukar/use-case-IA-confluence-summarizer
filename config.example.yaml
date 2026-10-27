@@ -1,0 +1,47 @@
+# Copy to config.yaml and adapt. Paths are relative to this file.
+
+# Spaces to analyze (space keys).
+spaces: [TEST]
+
+# Never send pages from these spaces, or with these labels, to Claude.
+exclude_spaces: []
+exclude_labels: [confidential]
+
+database: data/dochealth.sqlite
+output_dir: output
+
+report:
+  space: TEST
+  # Give parent_id, or parent_title (looked up in the report space).
+  parent_id: null
+  parent_title: "Documentation Health"
+  max_rows_per_category: 200
+
+llm:
+  claude_bin: claude
+  # Hard cap per run, shared by all phases. Pro plan: keep this modest.
+  max_calls_per_run: 40
+  timeout_seconds: 300
+  models:
+    classify: haiku    # triage
+    compare: sonnet    # duplicates / contradictions
+    draft: sonnet      # change suggestions
+
+atlassian:
+  page_size: 100
+  max_retries: 5
+
+triage:
+  # Candidate = not modified for stale_modified_days AND (if analytics available) no views in unread_days.
+  stale_modified_days: 540
+  unread_days: 365
+  use_analytics: auto        # auto | true | false
+  analytics_refresh_days: 7  # re-fetch view counts older than this
+  max_chars: 6000            # page text sent to Claude is truncated to this
+  # Pages matching these are classified historical_record by rule, without an LLM call.
+  historical_labels: [meeting-notes, meeting-minutes, retrospective, retro, decision, decisions, decision-log]
+  historical_title_patterns:
+    - '(?i)\bmeeting notes\b'
+    - '(?i)\bretrospective\b'
+    - '(?i)\bdecision log\b'
+    - '^\d{4}-\d{2}-\d{2}\b'
