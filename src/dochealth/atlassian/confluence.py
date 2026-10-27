@@ -156,3 +156,8 @@ class Confluence:
         webui = (page.get("_links") or {}).get("webui", "")
         page["url"] = self.wiki_base + webui if webui else ""
         return page
+
+    def create_footer_comment(self, page_id: str, storage: str) -> dict:
+        """Add a new footer comment to a page (the page itself is not modified)."""
+        return self.http.post_json("/wiki/api/v2/footer-comments", {
+            "pageId": page_id, "body": {"representation": "storage", "value": storage}})

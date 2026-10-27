@@ -1,11 +1,11 @@
 # dochealth: Confluence Documentation Health Tool
 
 Finds stale, obsolete, duplicate and outdated Confluence pages and reports them. Output is
-a **report page published to Confluence** (plus a local Markdown copy) and, in a later phase,
-**suggested edits posted as page comments**. There is no chatbot.
+a **report page published to Confluence** (plus a local Markdown copy) and **suggested edits
+posted as page comments**. There is no chatbot.
 
 The tool **never edits, moves, archives or deletes pages**: it only creates the report page
-and (Phase 3) adds comments. Every write can be redirected to local files with `--dry-run`.
+and adds comments. Every write can be redirected to local files with `--dry-run`.
 
 The only LLM is Claude, through the **Claude Code CLI in headless mode (`claude -p`)** using
 your Claude subscription. The tool never calls the Anthropic API and refuses to start if
@@ -15,7 +15,7 @@ your Claude subscription. The tool never calls the Anthropic API and refuses to 
 |---|---|---|
 | 1 | Inventory + archive triage (relevant / obsolete / duplicate / historical_record) | built |
 | 2 | Duplicates and contradictions (embeddings + clustering) | built |
-| 3 | Change detection from resolved Jira issues, proposed edits as comments | planned |
+| 3 | Change detection from done Jira issues, proposed edits as comments | built |
 
 See `docs/BRIEF.md` for the full specification and `docs/PROGRESS.md` for status.
 
@@ -119,13 +119,13 @@ When you are happy with it, drop `--dry-run` to publish the report page.
 | `dochealth report` | Build the report page and the Markdown copy |
 | `dochealth duplicates` | Embed pages, group similar ones, ask Claude for contradictions and a canonical page |
 | `dochealth tune-threshold` | Print page pairs at several similarity thresholds (no LLM calls) |
-| `dochealth run-all` | inventory, triage, duplicates, then report |
-| `dochealth changes` | Phase 3 (not built yet) |
+| `dochealth changes` | Check Jira issues done since the last run against the docs; post suggested edits as comments |
+| `dochealth run-all` | inventory, triage, duplicates, changes (if `jira.jql` is set), then report |
 
 Common options: `--dry-run`, `--config PATH`, `--space KEY` (repeatable, overrides config),
 `--page ID_OR_TITLE` / `--exclude-page ID_OR_TITLE` (repeatable, with a single `--space`:
 only that page subtree),
-`--max-llm-calls N`, `-v`.
+`--max-llm-calls N`, `--jql JQL` (overrides `jira.jql`), `-v`.
 
 Exit codes: `0` ok, `1` error, `2` configuration error, `75` Claude usage limit reached
 (progress saved; the next run resumes).
@@ -169,6 +169,36 @@ dochealth tune-threshold --space CDP --page "Espace Team PO/CPO"
 It prints, per threshold, how many pairs and groups you would get and sample pairs just above
 it. Pick the lowest threshold whose samples still look like the same topic, and set
 `duplicates.threshold`. Each group costs one Claude call.
+
+## Change detection from Jira
+
+Uses the same Atlassian API token (it needs read access to the Jira projects).
+
+1. **Fetch**: issues matching `jira.jql` whose `jira.date_field` (default
+   `statusCategoryChangedDate`, i.e. when the issue reached a Done status) is after the
+   previous run. The first run looks back `jira.first_run_lookback_days`. Issues are stored,
+   so an interrupted run resumes where it stopped.
+2. **Rules (free)**: sub-tasks, issues abandoned / refused / closed as duplicates, and
+   `changes.skip_issue_types` are dropped.
+3. **Retrieval (free, local)**: the issue (summary, description, fix versions, linked issues)
+   is embedded and compared with the page chunks. Historical records (sprint pages, meeting
+   notes... see `triage.historical_*`) and pages triaged obsolete are left out: they should not
+   be updated. Issues with no chunk above `changes.similarity_threshold` stop here.
+4. **Claude (`sonnet`, one call per issue, closest matches first)**: for each of the top 5
+   excerpts, says whether the issue makes it outdated and, if so, quotes the exact current
+   text and drafts the replacement. A quote that is not literally in the page is rejected.
+5. **Comment**: suggestions with confidence >= `changes.min_confidence` are posted as a footer
+   comment that @mentions the page owner (or the last editor if the owner left), with the
+   current text, the proposed text, the Jira link and *"AI-generated suggestion, please verify
+   before applying."* A suggestion is never posted twice (tracked in SQLite), and is not posted
+   if the owner already changed that text. At most `changes.max_comments_per_run` per run.
+
+With `--dry-run`, comments are written to `output/dry-run/<timestamp>/comments/` instead;
+a later real run posts them (if still valid).
+
+```bash
+dochealth changes --dry-run --jql 'project = CDP AND statusCategory = Done' --max-llm-calls 6
+```
 
 ## Page view analytics
 
@@ -220,6 +250,7 @@ the tests make no network calls and use no Claude quota.
 
 ## Data and privacy
 
-Page content of triage candidates (truncated) is sent to Claude through your Claude Code
+Page content of triage candidates, duplicate groups and excerpts matched to Jira issues
+(truncated), and the text of those Jira issues, is sent to Claude through your Claude Code
 subscription. Use `exclude_spaces` and `exclude_labels` for anything that must not leave
 Confluence. Local data (`data/`, `output/`) contains page text; keep it on your machine.

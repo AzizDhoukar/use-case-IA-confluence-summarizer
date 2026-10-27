@@ -129,3 +129,13 @@ def test_tune_threshold_output(db, project, fake_encoder):
     out = tune_threshold(cfg, db, fake_encoder)
     assert "3 pages, 3 pairs" in out
     assert "threshold 0.85:" in out and "Accès VPN" in out
+
+
+def test_report_category_order_and_definitions(db, project):
+    data = build_report_data(load_config(project / "config.yaml"), db)
+    for text in (render_storage(data), render_markdown(data)):
+        positions = [text.rindex(label)
+                     for label in ("RELEVANT", "DUPLICATE", "OBSOLETE", "HISTORICAL")]
+        assert positions == sorted(positions)
+        assert "Categories" in text and "Worth keeping as a record" in text
+        assert text.index("Categories") < text.index("Archive triage")

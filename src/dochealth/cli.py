@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .atlassian.confluence import Confluence
 from .atlassian.http import AtlassianError, AtlassianHTTP
+from .atlassian.jira import Jira
 from .config import Config, ConfigError, check_no_api_key, load_config
 from .db import Database
 from .llm.claude_cli import ClaudeCLI, LLMError
@@ -30,9 +31,9 @@ COMMANDS = {
     "triage": "Classify stale/unread pages (relevant, obsolete, duplicate, historical_record)",
     "duplicates": "Cluster similar pages, find contradictions, recommend a canonical page",
     "tune-threshold": "Print sample page pairs at several similarity thresholds (no LLM)",
-    "changes": "Propose edits from resolved Jira issues (Phase 3, not yet built)",
+    "changes": "Propose page edits from Jira issues done since the last run (comments)",
     "report": "Build the report page (+ local Markdown copy)",
-    "run-all": "inventory + triage + duplicates + report",
+    "run-all": "inventory + triage + duplicates + changes + report",
 }
 
 
@@ -51,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--exclude-page", action="append", metavar="ID_OR_TITLE",
                         help="skip this page and its descendants (repeatable; needs one --space)")
         sp.add_argument("--max-llm-calls", type=int, help="override llm.max_calls_per_run")
+        sp.add_argument("--jql", help="override jira.jql (change detection)")
         sp.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -89,15 +91,15 @@ def run_lock(output_dir: Path):
         yield
 
 
-def make_confluence(cfg: Config) -> Confluence | None:
+def make_http(cfg: Config) -> AtlassianHTTP | None:
     if cfg.credentials is None:
         return None
     c = cfg.credentials
-    return Confluence(AtlassianHTTP(c.site_url, c.email, c.api_token,
-                                    max_retries=cfg["atlassian"]["max_retries"]))
+    return AtlassianHTTP(c.site_url, c.email, c.api_token,
+                         max_retries=cfg["atlassian"]["max_retries"])
 
 
-PHASE2_MISSING = ("Duplicate detection needs numpy, scikit-learn and sentence-transformers. "
+PHASE2_MISSING = ("Duplicate and change detection need numpy, scikit-learn and sentence-transformers. "
                   "Install them (see README: CPU-only torch first, then pip install -e .)")
 
 
@@ -116,8 +118,8 @@ def make_encoder(cfg: Config):
     return SentenceTransformerEncoder(e["model"], e["batch_size"])
 
 
-def do_report(cfg: Config, db: Database, confluence: Confluence | None, dry_run: bool,
-              run_id: int, stats: dict) -> str:
+def do_report(cfg: Config, db: Database, publisher: Publisher, run_id: int,
+              stats: dict) -> str:
     data = build_report_data(cfg, db, run_id, stats)
     reports_dir = cfg.path("output_dir") / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -128,12 +130,11 @@ def do_report(cfg: Config, db: Database, confluence: Confluence | None, dry_run:
     rcfg = cfg["report"]
     if not rcfg["space"]:
         raise ConfigError("config: report.space is required")
-    publisher = Publisher(confluence, dry_run, cfg.path("output_dir"))
     location = publisher.publish_report(
         rcfg["space"], str(rcfg["parent_id"]) if rcfg["parent_id"] else None,
         rcfg["parent_title"], data.title,
         render_storage(data, rcfg["max_rows_per_category"]))
-    if not dry_run:
+    if not publisher.dry_run:
         db.set_meta("last_report_run_id", str(run_id))
     stats["report"] = {"location": location, "markdown": str(md_path)}
     return location
@@ -159,11 +160,9 @@ def main(argv: list[str] | None = None) -> int:
                                "exclude_pages": args.exclude_page or []}]
     if args.max_llm_calls is not None:
         cfg.data["llm"]["max_calls_per_run"] = args.max_llm_calls
+    if args.jql:
+        cfg.data["jira"]["jql"] = args.jql
     setup_logging(cfg.path("output_dir"), args.verbose)
-
-    if args.command == "changes":
-        log.error("'%s' is not implemented yet (later phase)", args.command)
-        return EXIT_ERROR
 
     try:
         with run_lock(cfg.path("output_dir")):
@@ -179,7 +178,16 @@ def _run(args, cfg: Config) -> int:
     stats: dict = {"command": args.command, "dry_run": args.dry_run, "errors": []}
     llm = ClaudeCLI(db, cfg["llm"]["claude_bin"], cfg["llm"]["max_calls_per_run"],
                     cfg["llm"]["timeout_seconds"])
-    confluence = make_confluence(cfg)
+    http = make_http(cfg)
+    confluence = Confluence(http) if http else None
+    publisher = Publisher(confluence, args.dry_run, cfg.path("output_dir"))
+    encoders: list = []
+
+    def encoder():  # one instance per run, so the model is loaded at most once
+        if not encoders:
+            encoders.append(make_encoder(cfg))
+        return encoders[0]
+
     status, code = "ok", EXIT_OK
     log.info("Run %d: %s%s, scope=%s", run_id, args.command,
              " (dry-run)" if args.dry_run else "", [s.describe() for s in cfg.scopes])
@@ -192,23 +200,37 @@ def _run(args, cfg: Config) -> int:
                 status = "partial"
                 if stats["triage"]["stopped"] == "rate_limit":
                     code = EXIT_RATE_LIMIT
-        if args.command in ("duplicates", "tune-threshold") and not phase2_available():
+        if args.command in ("duplicates", "tune-threshold", "changes") \
+                and not phase2_available():
             raise ConfigError(PHASE2_MISSING)
         if args.command == "run-all" and not phase2_available():
             log.warning("Skipping duplicates: %s", PHASE2_MISSING)
         elif args.command in ("duplicates", "run-all"):
             from .phases.duplicates import run_duplicates
-            stats["duplicates"] = run_duplicates(cfg, db, llm, make_encoder(cfg), run_id)
+            stats["duplicates"] = run_duplicates(cfg, db, llm, encoder(), run_id)
             if stats["duplicates"]["stopped"]:
                 status = "partial"
                 if stats["duplicates"]["stopped"] == "rate_limit":
                     code = EXIT_RATE_LIMIT
         if args.command == "tune-threshold":
             from .phases.duplicates import tune_threshold
-            print(tune_threshold(cfg, db, make_encoder(cfg)))
+            print(tune_threshold(cfg, db, encoder()))
+        if args.command == "changes" and not cfg["jira"]["jql"]:
+            raise ConfigError("config: jira.jql is required for change detection "
+                              "(e.g. 'project = CDP AND statusCategory = Done')")
+        if args.command == "run-all" and not cfg["jira"]["jql"]:
+            log.info("Skipping change detection: jira.jql is not set")
+        elif args.command in ("changes", "run-all") and phase2_available():
+            from .phases.changes import run_changes
+            stats["changes"] = run_changes(cfg, db, Jira(http), llm, encoder(),
+                                           publisher, run_id)
+            if stats["changes"]["stopped"]:
+                status = "partial"
+                if stats["changes"]["stopped"] == "rate_limit":
+                    code = EXIT_RATE_LIMIT
         stats["llm"] = llm.stats.as_dict()
         if args.command in ("report", "run-all"):
-            location = do_report(cfg, db, confluence, args.dry_run, run_id, stats)
+            location = do_report(cfg, db, publisher, run_id, stats)
             print(f"Report: {location}")
     except (AtlassianError, LLMError, ConfigError) as exc:
         log.error("%s", exc)

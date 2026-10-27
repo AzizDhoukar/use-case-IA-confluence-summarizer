@@ -56,7 +56,31 @@ DEFAULTS: dict[str, Any] = {
         "max_chars_per_page": 4000,
         "tune_thresholds": [0.95, 0.9, 0.85, 0.8, 0.75, 0.7],
     },
+    "jira": {
+        "jql": "",                     # empty = change detection disabled
+        "date_field": "statusCategoryChangedDate",
+        "first_run_lookback_days": 30,
+        "page_size": 100,
+    },
+    "changes": {
+        "skip_subtasks": True,
+        "skip_issue_types": [],
+        # Issues closed without doing the work cannot make documentation outdated.
+        "skip_statuses": ["Abandonnée", "Abandonné", "Annulé", "Annulée", "Refusé", "Refusée",
+                          "Cancelled", "Canceled", "Rejected", "Won't Do"],
+        "skip_resolutions": ["Won't Do", "Won't Fix", "Duplicate", "Cannot Reproduce",
+                             "Doublon", "Impossible à reproduire", "Non accepté",
+                             "Non accepté(e)", "Refusé", "Refusée", "Non résolue"],
+        "similarity_threshold": 0.65,
+        "top_k": 5,
+        "min_confidence": 0.7,
+        "max_comments_per_run": 10,
+        "max_issue_chars": 3000,
+        "max_chars_per_excerpt": 2000,
+    },
 }
+
+DATE_FIELDS = ("statusCategoryChangedDate", "resolved", "updated")
 
 
 def check_no_api_key(environ: dict[str, str] | None = None) -> None:
@@ -172,6 +196,8 @@ def load_config(config_path: str | Path, env_path: str | Path | None = None,
     parse_scopes(data["spaces"])  # validate early
     if data["triage"]["use_analytics"] not in ("auto", True, False):
         raise ConfigError("config: triage.use_analytics must be auto, true or false")
+    if data["jira"]["date_field"] not in DATE_FIELDS:
+        raise ConfigError(f"config: jira.date_field must be one of {', '.join(DATE_FIELDS)}")
 
     creds = None
     site = os.environ.get("ATLASSIAN_SITE_URL", "").rstrip("/")

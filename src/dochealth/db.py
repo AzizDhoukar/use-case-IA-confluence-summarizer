@@ -101,6 +101,38 @@ CREATE TABLE IF NOT EXISTS clusters (
     analyzed_at    TEXT,
     last_seen_run  INTEGER
 );
+
+-- Phase 3: Jira issues done since the last run, processed once each.
+CREATE TABLE IF NOT EXISTS jira_issues (
+    key            TEXT PRIMARY KEY,
+    done_at        TEXT,
+    data_json      TEXT NOT NULL,
+    status         TEXT NOT NULL,   -- pending | done | skipped | no_match | failed
+    reason         TEXT,
+    fetched_run    INTEGER,
+    processed_run  INTEGER
+);
+
+-- Phase 3: suggested edits. fingerprint = hash(page, current text, proposed text):
+-- the same suggestion is never posted twice, whichever issue produced it.
+CREATE TABLE IF NOT EXISTS suggestions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint    TEXT NOT NULL UNIQUE,
+    issue_key      TEXT NOT NULL,
+    page_id        TEXT NOT NULL,
+    confidence     REAL NOT NULL,
+    similarity     REAL,
+    current_text   TEXT NOT NULL,
+    proposed_text  TEXT NOT NULL,
+    explanation    TEXT,
+    status         TEXT NOT NULL,   -- new | dry_run | posted | low_confidence | outdated | duplicate
+    comment_id     TEXT,
+    location       TEXT,            -- comment URL, or local file in dry-run
+    created_run    INTEGER,
+    last_run       INTEGER,
+    posted_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_suggestions_page ON suggestions(page_id, issue_key);
 """
 
 
@@ -175,3 +207,11 @@ class Database:
             return ""
         row = self.one("SELECT display_name FROM users WHERE account_id = ?", (account_id,))
         return (row["display_name"] if row and row["display_name"] else account_id)
+
+    def owner_account(self, owner_id: str | None, last_modifier_id: str | None) -> str | None:
+        """Page owner, falling back to the last modifier when the owner is gone."""
+        if owner_id:
+            row = self.one("SELECT account_status FROM users WHERE account_id = ?", (owner_id,))
+            if row is None or row["account_status"] in (None, "active"):
+                return owner_id
+        return last_modifier_id

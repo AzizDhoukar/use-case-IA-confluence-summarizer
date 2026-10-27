@@ -87,7 +87,8 @@ def _refresh_views(cfg: Config, db: Database, confluence: Confluence | None,
     db.commit()
 
 
-def _rule_category(page, cfg: Config) -> str | None:
+def historical_rule(page, cfg: Config) -> str | None:
+    """Reason why labels or title mark the page as a historical record, else None."""
     labels = {lab.lower() for lab in json.loads(page["labels_json"])}
     hist_labels = {lab.lower() for lab in cfg["triage"]["historical_labels"]}
     hit = labels & hist_labels
@@ -140,7 +141,7 @@ def run_triage(cfg: Config, db: Database, confluence: Confluence | None, llm: Cl
             stats["excluded"] += 1
             continue
 
-        rule_reason = _rule_category(page, cfg)
+        rule_reason = historical_rule(page, cfg)
         if rule_reason:
             if not (prev and prev["content_hash"] == page["content_hash"]
                     and prev["prompt_version"] == RULE_VERSION):

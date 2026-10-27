@@ -59,6 +59,29 @@ class DuplicateCluster:
 
 
 @dataclass
+class ChangeRow:
+    issue_key: str
+    issue_url: str
+    issue_summary: str
+    page: PageRef
+    confidence: float
+    status: str          # posted | dry_run | low_confidence | outdated | new (deferred)
+    location: str        # comment URL or local dry-run file
+    current_text: str
+    proposed_text: str
+    explanation: str
+
+
+@dataclass
+class ChangesSummary:
+    issues_fetched: int = 0
+    issues_skipped: int = 0
+    issues_no_match: int = 0
+    issues_analyzed: int = 0
+    issues_pending: int = 0
+
+
+@dataclass
 class ReportData:
     title: str
     report_date: str
@@ -73,18 +96,14 @@ class ReportData:
     duplicates: list[DuplicateCluster] | None = None   # None = phase never run
     duplicates_pending: int = 0
     duplicates_distinct: int = 0     # clusters judged related_but_distinct (not listed)
-    changes: list | None = None      # Phase 3
+    changes: list[ChangeRow] | None = None   # None = phase never run
+    changes_summary: ChangesSummary = field(default_factory=ChangesSummary)
     run_stats: dict = field(default_factory=dict)
 
 
 def owner_name(db: Database, owner_id: str | None, last_modifier_id: str | None) -> str:
     """Page owner, falling back to the last modifier when the owner is gone or unknown."""
-    if owner_id:
-        row = db.one("SELECT display_name, account_status FROM users WHERE account_id = ?",
-                     (owner_id,))
-        if row is None or row["account_status"] in (None, "active"):
-            return db.user_name(owner_id)
-    return db.user_name(last_modifier_id)
+    return db.user_name(db.owner_account(owner_id, last_modifier_id))
 
 
 def collect_run_stats(db: Database, current_run_id: int | None, current: dict | None) -> dict:
@@ -106,7 +125,8 @@ def collect_run_stats(db: Database, current_run_id: int | None, current: dict | 
         agg["llm_failures"] += llm.get("failures", 0)
         agg["errors"] += len(s.get("errors") or []) + (s.get("triage") or {}).get("errors", 0)
         agg["errors"] += (s.get("duplicates") or {}).get("errors", 0)
-        for phase in ("triage", "duplicates"):
+        agg["errors"] += (s.get("changes") or {}).get("errors", 0)
+        for phase in ("triage", "duplicates", "changes"):
             stopped = (s.get(phase) or {}).get("stopped")
             if stopped:
                 agg["stopped"].append(f"{phase}: {stopped}")
@@ -135,6 +155,7 @@ def build_report_data(cfg: Config, db: Database, current_run_id: int | None = No
         rows.sort(key=lambda r: r.confidence, reverse=True)
 
     duplicates, dup_pending, dup_distinct = collect_duplicates(db)
+    changes, changes_summary = collect_changes(db)
     return ReportData(
         title=REPORT_TITLE.format(date=today.isoformat()),
         report_date=today.isoformat(),
@@ -149,6 +170,8 @@ def build_report_data(cfg: Config, db: Database, current_run_id: int | None = No
         duplicates=duplicates,
         duplicates_pending=dup_pending,
         duplicates_distinct=dup_distinct,
+        changes=changes,
+        changes_summary=changes_summary,
         run_stats=collect_run_stats(db, current_run_id, current_stats),
     )
 
@@ -192,3 +215,37 @@ def collect_duplicates(db: Database) -> tuple[list[DuplicateCluster] | None, int
     # Clusters with contradictions first, then duplicates before overlaps.
     clusters.sort(key=lambda c: (-len(c.conflicts), c.relationship != "duplicate", -c.similarity))
     return clusters, pending, distinct
+
+
+CHANGE_STATUS_ORDER = {"posted": 0, "dry_run": 0, "new": 1, "low_confidence": 2, "outdated": 3}
+
+
+def collect_changes(db: Database) -> tuple[list[ChangeRow] | None, ChangesSummary]:
+    """Suggestions handled by the latest change-detection run, and its issue counts."""
+    run_id = db.get_meta("changes_run_id")
+    if run_id is None:
+        return None, ChangesSummary()
+    run_id = int(run_id)
+    counts = {r["status"]: r["n"] for r in db.query(
+        "SELECT status, COUNT(*) AS n FROM jira_issues WHERE fetched_run = ? "
+        "OR processed_run = ? GROUP BY status", (run_id, run_id))}
+    summary = ChangesSummary(
+        issues_fetched=sum(counts.values()),
+        issues_skipped=counts.get("skipped", 0),
+        issues_no_match=counts.get("no_match", 0),
+        issues_analyzed=counts.get("done", 0) + counts.get("failed", 0),
+        issues_pending=db.one("SELECT COUNT(*) AS n FROM jira_issues "
+                              "WHERE status = 'pending'")["n"])
+    rows = []
+    for s in db.query("SELECT * FROM suggestions WHERE last_run = ? AND status != 'duplicate'",
+                      (run_id,)):
+        rec = db.one("SELECT data_json FROM jira_issues WHERE key = ?", (s["issue_key"],))
+        issue = json.loads(rec["data_json"]) if rec else {}
+        rows.append(ChangeRow(
+            issue_key=s["issue_key"], issue_url=issue.get("url", ""),
+            issue_summary=issue.get("summary", ""), page=page_ref(db, s["page_id"]),
+            confidence=s["confidence"], status=s["status"], location=s["location"] or "",
+            current_text=s["current_text"], proposed_text=s["proposed_text"],
+            explanation=s["explanation"] or ""))
+    rows.sort(key=lambda r: (CHANGE_STATUS_ORDER.get(r.status, 9), -r.confidence))
+    return rows, summary

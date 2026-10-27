@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from html import escape
 
-from .data import DuplicateCluster, ReportData
+from .data import ChangeRow, DuplicateCluster, ReportData
 
 CATEGORY_STYLE = {
     "obsolete": ("Red", "OBSOLETE"),
@@ -12,8 +12,18 @@ CATEGORY_STYLE = {
     "historical_record": ("Blue", "HISTORICAL"),
     "relevant": ("Green", "RELEVANT"),
 }
-# Order sections by how actionable they are.
-CATEGORY_ORDER = ["obsolete", "duplicate", "historical_record", "relevant"]
+CATEGORY_ORDER = ["relevant", "duplicate", "obsolete", "historical_record"]
+CATEGORY_DEFINITIONS = {
+    "relevant": "Still accurate and useful, even if rarely read or edited. Keep it as it is.",
+    "duplicate": "Its content is mostly repeated in another page. Merge what is missing into "
+                 "the main page, then archive this one.",
+    "obsolete": "Describes something that no longer exists or no longer works this way "
+                "(retired tool, old process, past version). Archive it, or update it if the "
+                "topic is still needed.",
+    "historical_record": "Dated by nature (meeting notes, decision logs, retrospectives, "
+                         "sprint reports). Worth keeping as a record of what happened; label "
+                         "it as such rather than updating or archiving it.",
+}
 
 
 def lozenge(title: str, colour: str) -> str:
@@ -56,7 +66,13 @@ def render_storage(data: ReportData, max_rows: int = 200) -> str:
          "not analyzed" if data.duplicates is None else str(len(data.duplicates))],
         ["Contradictions found", "not analyzed" if data.duplicates is None
          else str(sum(len(c.conflicts) for c in data.duplicates))],
+        ["Suggested edits (from Jira)", "not analyzed" if data.changes is None
+         else str(sum(1 for c in data.changes if c.status in ("posted", "dry_run")))],
     ]))
+    out.append("<h2>Categories</h2>")
+    out.append(table(["Category", "Definition"], [
+        [lozenge(CATEGORY_STYLE[c][1], CATEGORY_STYLE[c][0]), escape(CATEGORY_DEFINITIONS[c])]
+        for c in CATEGORY_ORDER]))
     if not data.analytics:
         out.append(panel("note", "<p>Page view analytics are not available on this Confluence "
                                  "site/plan. Archive candidates are selected on modification "
@@ -92,9 +108,8 @@ def render_storage(data: ReportData, max_rows: int = 200) -> str:
     out.append("<h1>Duplicates and contradictions</h1>")
     out.append(render_duplicates(data))
 
-    # Later phases
     out.append("<h1>Change suggestions</h1>")
-    out.append("<p><em>Not analyzed in this run.</em></p>" if data.changes is None else "")
+    out.append(render_changes(data))
 
     # Run statistics
     out.append("<h1>Run statistics</h1>")
@@ -155,3 +170,68 @@ def _cluster(c: DuplicateCluster) -> str:
         out.append(f"<p><strong>Merge notes:</strong> {escape(c.merge_notes)}</p>")
     out.append(f"<p><em>Similarity {c.similarity:.2f}</em></p>")
     return "".join(out)
+
+
+AI_NOTICE = "AI-generated suggestion, please verify before applying."
+
+CHANGE_STYLE = {
+    "posted": ("Green", "COMMENT POSTED"),
+    "dry_run": ("Blue", "DRY RUN"),
+    "new": ("Grey", "WAITING"),
+    "low_confidence": ("Yellow", "LOW CONFIDENCE"),
+    "outdated": ("Grey", "PAGE CHANGED"),
+}
+
+
+def _lines(text: str) -> str:
+    return "<br/>".join(escape(line) for line in text.splitlines())
+
+
+def comment_storage(issue: dict, current: str, proposed: str, explanation: str,
+                    confidence: float, account_id: str | None) -> str:
+    """Footer comment proposing an edit (the page itself is never modified)."""
+    mention = (f'<ac:link><ri:user ri:account-id="{escape(account_id)}" /></ac:link> '
+               if account_id else "")
+    summary = f" ({escape(issue.get('summary', ''))})" if issue.get("summary") else ""
+    return (f"<p>{mention}The Jira issue {link(issue['key'], issue.get('url', ''))}{summary} "
+            "may make this page outdated. Suggested edit:</p>"
+            "<p><strong>Current text:</strong></p>"
+            f"<blockquote><p>{_lines(current)}</p></blockquote>"
+            "<p><strong>Proposed text:</strong></p>"
+            f"<blockquote><p>{_lines(proposed)}</p></blockquote>"
+            f"<p><strong>Why:</strong> {escape(explanation)} (confidence {confidence:.2f})</p>"
+            f"<p><em>{AI_NOTICE}</em></p>")
+
+
+def render_changes(data: ReportData) -> str:
+    if data.changes is None:
+        return "<p><em>Not analyzed in this run.</em></p>"
+    cs = data.changes_summary
+    out = ["<p>Jira issues completed since the previous run were compared with the "
+           "documentation. Where an issue makes a passage outdated, a replacement was drafted "
+           "and posted as a comment for the page owner. Pages are never edited.</p>",
+           table(["Jira issues", "Count"], [
+               ["Handled in this run", str(cs.issues_fetched)],
+               ["Skipped by rules (sub-tasks, abandoned...)", str(cs.issues_skipped)],
+               ["No related documentation", str(cs.issues_no_match)],
+               ["Analyzed by AI", str(cs.issues_analyzed)],
+               ["Waiting for the next run", str(cs.issues_pending)],
+           ])]
+    if not data.changes:
+        out.append("<p><em>No documentation update suggested.</em></p>")
+        return "".join(out)
+    out.append(table(["Jira issue", "Page", "Owner", "Confidence", "Status", "Suggestion"],
+                     [_change_row(c) for c in data.changes]))
+    return "".join(out)
+
+
+def _change_row(c: ChangeRow) -> list[str]:
+    colour, label = CHANGE_STYLE.get(c.status, ("Grey", c.status.upper()))
+    status = lozenge(label, colour)
+    if c.status == "posted" and c.location:
+        status += f'<br/><a href="{escape(c.location)}">comment</a>'
+    return [link(c.issue_key, c.issue_url) + (f"<br/>{escape(c.issue_summary)}"
+                                              if c.issue_summary else ""),
+            link(c.page.title, c.page.url), escape(c.page.owner), f"{c.confidence:.2f}", status,
+            f"<em>{escape(c.current_text)}</em><br/>&#8594; {escape(c.proposed_text)}"
+            f"<br/>{escape(c.explanation)}"]

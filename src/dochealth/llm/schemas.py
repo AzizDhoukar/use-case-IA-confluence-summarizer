@@ -44,3 +44,29 @@ DUPLICATES = {
                  "merge_notes"],
     "additionalProperties": False,
 }
+
+CHANGES = {
+    "type": "object",
+    "properties": {
+        "suggestions": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "excerpt": {"type": "string"},
+                    "affected": {"type": "boolean"},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "current_text": {"type": "string", "maxLength": 1500},
+                    "proposed_text": {"type": "string", "maxLength": 3000},
+                    "explanation": {"type": "string", "maxLength": 600},
+                },
+                "required": ["excerpt", "affected", "confidence", "current_text",
+                             "proposed_text", "explanation"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["suggestions"],
+    "additionalProperties": False,
+}

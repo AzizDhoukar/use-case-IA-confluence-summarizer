@@ -24,8 +24,8 @@ class Publisher:
         self.dry_dir = Path(output_dir) / "dry-run" / self.stamp
 
     def _write(self, name: str, content: str) -> Path:
-        self.dry_dir.mkdir(parents=True, exist_ok=True)
         path = self.dry_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return path
 
@@ -56,3 +56,21 @@ class Publisher:
         page = self.confluence.create_page(space_id, parent_id, final_title, storage)
         log.info("Report page created: %s", page.get("url"))
         return page.get("url") or str(page.get("id"))
+
+    def post_comment(self, page_id: str, page_url: str, name: str, storage: str,
+                     meta: dict) -> tuple[str | None, str]:
+        """Add a footer comment. Returns (comment id, URL), or (None, local path) in dry-run."""
+        if self.dry_run:
+            self._write(f"comments/{name}.json", json.dumps(
+                {"action": "create_footer_comment", "page_id": page_id, **meta},
+                indent=2, ensure_ascii=False))
+            path = self._write(f"comments/{name}.storage.html", storage)
+            log.info("[dry-run] comment for page %s written to %s", page_id, path)
+            return None, str(path)
+
+        assert self.confluence is not None
+        comment = self.confluence.create_footer_comment(page_id, storage)
+        cid = str(comment.get("id", ""))
+        url = f"{page_url}?focusedCommentId={cid}#comment-{cid}" if page_url and cid else page_url
+        log.info("Comment %s posted on page %s", cid, page_id)
+        return cid, url

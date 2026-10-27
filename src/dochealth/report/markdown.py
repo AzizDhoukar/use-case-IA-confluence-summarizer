@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .data import ReportData
-from .storage import CATEGORY_ORDER, CATEGORY_STYLE
+from .storage import CATEGORY_DEFINITIONS, CATEGORY_ORDER, CATEGORY_STYLE, CHANGE_STYLE
 
 
 def _cell(text: str) -> str:
@@ -31,7 +31,12 @@ def render_markdown(data: ReportData) -> str:
          "not analyzed" if data.duplicates is None else len(data.duplicates)],
         ["Contradictions found", "not analyzed" if data.duplicates is None
          else sum(len(c.conflicts) for c in data.duplicates)],
+        ["Suggested edits (from Jira)", "not analyzed" if data.changes is None
+         else sum(1 for c in data.changes if c.status in ("posted", "dry_run"))],
     ])
+    out += ["### Categories", ""]
+    out += _table(["Category", "Definition"],
+                  [[CATEGORY_STYLE[c][1], CATEGORY_DEFINITIONS[c]] for c in CATEGORY_ORDER])
     if not data.analytics:
         out += [f"> **Note:** page view analytics are not available; candidates are selected on "
                 f"modification date only (not modified for {data.stale_modified_days} days).", ""]
@@ -51,7 +56,7 @@ def render_markdown(data: ReportData) -> str:
                         r.modified, f"{r.confidence:.2f}", r.reason] for r in rows])
 
     out += ["## Duplicates and contradictions", ""] + _duplicates(data)
-    out += ["## Change suggestions", "", "_Not analyzed in this run._", ""]
+    out += ["## Change suggestions", ""] + _changes(data)
 
     out += ["## Run statistics", ""]
     out += _table(["Metric", "Value"], [
@@ -99,4 +104,30 @@ def _duplicates(data: ReportData) -> list[str]:
         if c.merge_notes:
             out += [f"**Merge notes:** {c.merge_notes}", ""]
         out += [f"_Similarity {c.similarity:.2f}_", ""]
+    return out
+
+
+def _changes(data: ReportData) -> list[str]:
+    if data.changes is None:
+        return ["_Not analyzed in this run._", ""]
+    cs = data.changes_summary
+    out = _table(["Jira issues", "Count"], [
+        ["Handled in this run", cs.issues_fetched],
+        ["Skipped by rules (sub-tasks, abandoned...)", cs.issues_skipped],
+        ["No related documentation", cs.issues_no_match],
+        ["Analyzed by AI", cs.issues_analyzed],
+        ["Waiting for the next run", cs.issues_pending],
+    ])
+    if not data.changes:
+        return out + ["_No documentation update suggested._", ""]
+    for c in data.changes:
+        issue = f"[{c.issue_key}]({c.issue_url})" if c.issue_url else c.issue_key
+        status = CHANGE_STYLE.get(c.status, ("", c.status.upper()))[1]
+        where = f" ([comment]({c.location}))" if c.status == "posted" and c.location else ""
+        out += [f"### {issue} → {_link(c.page)}", "",
+                f"{c.issue_summary}  ", f"Owner: {c.page.owner} · confidence {c.confidence:.2f}"
+                f" · **{status}**{where}", "",
+                "**Current text:**", "", *[f"> {ln}" for ln in c.current_text.splitlines()], "",
+                "**Proposed text:**", "", *[f"> {ln}" for ln in c.proposed_text.splitlines()], "",
+                f"**Why:** {c.explanation}", ""]
     return out

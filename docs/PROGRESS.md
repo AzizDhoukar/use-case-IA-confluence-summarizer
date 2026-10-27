@@ -4,13 +4,16 @@
 - Phase 1 (inventory + triage): accepted by user ("more or less done") after real runs on the
   personal space and CDP. Follow-up delivered: page-subtree selection (branch
   `feature/subtree-selection`).
-- Phase 2 (duplicates & contradictions): code + 50 mocked tests merged into main at the user's
-  request. NOT yet run on real data: sentence-transformers/torch are not installed (the CPU
-  torch install into the /mnt/c venv failed; C: is 98% full). To do: install the deps (venv
-  on the WSL disk, e.g. ~/.venvs/dochealth), `tune-threshold` + `run-all --dry-run` on the CDP
-  subtree "Espace Team PO/CPO", user approval. Without the deps, run-all skips duplicates
-  with a warning (Phase 1 keeps working).
-- Next: Phase 3 (Jira change detection) after Phase 2 approval; needs Jira projects / JQL.
+- Phase 2 (duplicates & contradictions): accepted by user ("phase 2 is ok"). torch 2.14.1+cpu
+  and sentence-transformers 6.2.0 work in the /mnt/c .venv (importing torch from /mnt/c takes
+  ~3 min per run; a venv on the WSL disk would be faster).
+- Phase 3 (Jira change detection): built on branch `feature/phase-3-changes`, 62 tests pass.
+  Dry-run validated on a scratch copy (CDP subtree "Espace Team PO/CPO", JQL
+  `project = CDP AND statusCategory = Done`, 30 days): 138 issues -> 42 after rules -> 21 above
+  0.65 -> 10 analyzed by sonnet (cap), 0 affected (verdicts reasonable). Awaiting user approval.
+  The user's own config.yaml has no `jira` block yet.
+- Report: triage sections now ordered relevant, duplicate, obsolete, historical, with a
+  category definitions table after the summary (user request).
 - Repo: https://github.com/AzizDhoukar/use-case-IA-confluence-summarizer. Phase 1 landed
   directly on main (user pushed). Later work goes on branches + PRs; pushing from this machine
   needs `gh auth login` + `gh auth setup-git` (not done yet).
@@ -61,6 +64,22 @@
   clusters are skipped.
 - CPU-only torch (download.pytorch.org/whl/cpu) to keep the install small.
 
+- Phase 3: Jira search via POST /rest/api/3/search/jql (nextPageToken). CDP's workflow never
+  sets resolution/resolutiondate, so the date filter is `statusCategoryChangedDate` (configurable:
+  resolved / updated). Cursor = meta `jira_since` (run time), queried with 1 day overlap; issues
+  stored in `jira_issues` (pending | done | skipped | no_match | failed), re-pending if done again.
+- Phase 3 prefilter: sub-tasks (~2/3 of CDP issues), French/English abandoned / refused / duplicate
+  statuses and resolutions, optional issue types. Target pages exclude historical records (rule
+  or triage) and triage-obsolete pages. Issues sorted by best chunk similarity before LLM calls.
+- Phase 3 LLM: one sonnet call per issue with top-5 chunks (`prompts/changes.md`); current_text
+  must be found literally (whitespace-normalized) in the chunk, else rejected.
+- Suggestions table: fingerprint = hash(page, current, proposed) UNIQUE -> never posted twice,
+  also skipped if the same issue already has a posted comment on the page; re-checked against the
+  current page text before posting (status outdated). Dry-run writes comments to
+  output/dry-run/<stamp>/comments and marks dry_run; a later real run posts them.
+- Similarity of issue vs chunk with the multilingual MiniLM is compressed (0.49-0.77 on CDP):
+  default threshold 0.65.
+
 ## Open points to check on the real site
 - Analytics endpoint `GET /wiki/rest/api/analytics/content/{id}/views?fromDate=YYYY-MM-DD`
   (date format and plan availability).
@@ -75,3 +94,6 @@
 - 2026-10-27: Real runs OK (personal space, CDP; page analytics available on this plan).
   Added page-subtree selection + friendlier unknown-space error. Implemented Phase 2
   (lazy imports so Phase 1 runs without its deps). Selection + Phase 2 merged into main.
+- 2026-10-27: Phase 2 accepted. Phase 3 implemented (Jira client, change detection, footer
+  comments via publisher, report section), validated with capped dry runs on a scratch DB.
+  Report: category order + definitions.

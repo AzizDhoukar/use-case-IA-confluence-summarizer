@@ -127,3 +127,22 @@ def test_run_all_without_phase2_deps_skips_duplicates(run, project, monkeypatch)
     md = next((project / "output" / "reports").glob("*.md")).read_text()
     assert "## Duplicates and contradictions\n\n_Not analyzed in this run._" in md
     assert run("duplicates") == cli.EXIT_ERROR
+
+
+@responses.activate
+def test_run_all_with_jira_dry_run_never_writes(run, project):
+    mock_confluence()
+    responses.post(f"{SITE}/rest/api/3/search/jql", json={"issues": [{"key": "CDP-1", "fields": {
+        "summary": "Use the v2 endpoint", "issuetype": {"name": "Story", "subtask": False},
+        "status": {"name": "Done"}, "statuscategorychangedate": "2026-10-26T10:00:00.000+0100"}}],
+        "isLast": True})
+    assert run("run-all", "--dry-run", "--jql", "project = CDP") == 0
+    writes = [c for c in responses.calls if c.request.method != "GET"
+              and not c.request.url.endswith(("/users-bulk", "/rest/api/3/search/jql"))]
+    assert writes == []
+    md = next((project / "output" / "reports").glob("*.md")).read_text()
+    assert "| Handled in this run | 1 |" in md and "| No related documentation | 1 |" in md
+
+
+def test_changes_needs_jql(run, project):
+    assert run("changes", "--dry-run") == cli.EXIT_ERROR

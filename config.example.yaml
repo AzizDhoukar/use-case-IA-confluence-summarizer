@@ -54,6 +54,7 @@ triage:
     - '(?i)\bretrospective\b'
     - '(?i)\bdecision log\b'
     - '^\d{4}-\d{2}-\d{2}\b'
+    - '(?i)\bsprint\b'
 
 embeddings:
   # Runs locally (downloaded once from Hugging Face). Multilingual: French + English.
@@ -69,3 +70,28 @@ duplicates:
   min_chars: 300             # ignore near-empty pages (parents, placeholders)
   max_chars_per_page: 4000   # page text sent to Claude per page in a cluster
   tune_thresholds: [0.95, 0.9, 0.85, 0.8, 0.75, 0.7]
+
+jira:
+  # Issues matching this JQL and done since the previous run are checked against the docs.
+  # Empty = change detection disabled. Do not add a date condition: the tool appends it.
+  jql: ""                    # e.g. 'project = CDP AND statusCategory = Done'
+  # Date the tool filters on. statusCategoryChangedDate works even when the workflow
+  # never sets a resolution (as in CDP); use 'resolved' if your projects set one.
+  date_field: statusCategoryChangedDate
+  first_run_lookback_days: 30
+  page_size: 100
+
+changes:
+  # Rule-based prefilter, before any embedding or LLM work (names are case-insensitive).
+  skip_subtasks: true
+  skip_issue_types: []       # e.g. [Bogue, Retour, "Test intégration"] to keep only stories/evolutions
+  skip_statuses: [Abandonnée, Abandonné, Annulé, Annulée, Refusé, Refusée, Cancelled, Canceled, Rejected, "Won't Do"]
+  skip_resolutions: ["Won't Do", "Won't Fix", Duplicate, "Cannot Reproduce", Doublon, "Impossible à reproduire", "Non accepté", "Non accepté(e)", Refusé, Refusée, "Non résolue"]
+  # Top-k page chunks per issue whose similarity is >= threshold go to Claude (one call per issue).
+  # The multilingual model scores most issue/page pairs 0.5-0.75: 0.65 keeps about half.
+  similarity_threshold: 0.65
+  top_k: 5
+  min_confidence: 0.7        # suggestions below this are listed in the report, not posted
+  max_comments_per_run: 10
+  max_issue_chars: 3000      # issue description sent to Claude is truncated to this
+  max_chars_per_excerpt: 2000
