@@ -46,6 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="write report/comments to local files instead of Confluence")
         sp.add_argument("--space", action="append", metavar="KEY",
                         help="override the configured spaces (repeatable)")
+        sp.add_argument("--page", action="append", metavar="ID_OR_TITLE",
+                        help="only this page and its descendants (repeatable; needs one --space)")
+        sp.add_argument("--exclude-page", action="append", metavar="ID_OR_TITLE",
+                        help="skip this page and its descendants (repeatable; needs one --space)")
         sp.add_argument("--max-llm-calls", type=int, help="override llm.max_calls_per_run")
         sp.add_argument("-v", "--verbose", action="store_true")
     return p
@@ -128,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.space:
         cfg.data["spaces"] = args.space
+    if args.page or args.exclude_page:
+        if not args.space or len(args.space) != 1:
+            print("--page / --exclude-page need exactly one --space", file=sys.stderr)
+            return EXIT_CONFIG
+        cfg.data["spaces"] = [{"key": args.space[0], "include_pages": args.page or [],
+                               "exclude_pages": args.exclude_page or []}]
     if args.max_llm_calls is not None:
         cfg.data["llm"]["max_calls_per_run"] = args.max_llm_calls
     setup_logging(cfg.path("output_dir"), args.verbose)
@@ -152,8 +162,8 @@ def _run(args, cfg: Config) -> int:
                     cfg["llm"]["timeout_seconds"])
     confluence = make_confluence(cfg)
     status, code = "ok", EXIT_OK
-    log.info("Run %d: %s%s, spaces=%s", run_id, args.command,
-             " (dry-run)" if args.dry_run else "", cfg.spaces)
+    log.info("Run %d: %s%s, scope=%s", run_id, args.command,
+             " (dry-run)" if args.dry_run else "", [s.describe() for s in cfg.scopes])
     try:
         if args.command in ("inventory", "run-all"):
             stats["inventory"] = run_inventory(cfg, db, confluence, run_id)

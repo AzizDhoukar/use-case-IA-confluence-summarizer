@@ -103,7 +103,7 @@ def build_report_data(cfg: Config, db: Database, current_run_id: int | None = No
     return ReportData(
         title=REPORT_TITLE.format(date=today.isoformat()),
         report_date=today.isoformat(),
-        spaces=cfg.spaces,
+        spaces=[s.describe() for s in cfg.scopes],
         analytics=analytics_available(db),
         stale_modified_days=cfg["triage"]["stale_modified_days"],
         unread_days=cfg["triage"]["unread_days"],

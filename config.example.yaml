@@ -1,7 +1,16 @@
 # Copy to config.yaml and adapt. Paths are relative to this file.
 
-# Spaces to analyze (space keys).
-spaces: [TEST]
+# Spaces to analyze. Use the space KEY (in the URL: /wiki/spaces/<KEY>/...), quoted.
+# Personal spaces have keys starting with '~'.
+# An entry is either a key (whole space) or a mapping that narrows it to page subtrees:
+#   include_pages: page IDs or exact titles; each selects that page + all its descendants
+#   exclude_pages: same, removed from the selection
+# On the command line: --space CDP --page 12345 [--page "Spécifications"] [--exclude-page ...]
+spaces:
+  - "TEST"
+  # - key: "CDP"
+  #   include_pages: ["123456789", "Spécifications fonctionnelles"]
+  #   exclude_pages: ["Archives"]
 
 # Never send pages from these spaces, or with these labels, to Claude.
 exclude_spaces: []

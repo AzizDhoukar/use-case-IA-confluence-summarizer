@@ -89,12 +89,15 @@ class AtlassianHTTP:
         return self.request("POST", path, json=body).json()
 
     def paginate(self, path: str, params: dict | None = None) -> Iterator[dict]:
-        """Yield items from a v2 cursor-paginated endpoint (follows _links.next)."""
+        """Yield items from a cursor-paginated endpoint, v2 or v1 (follows _links.next)."""
         data = self.get_json(path, params)
         while True:
             yield from data.get("results", [])
             nxt = (data.get("_links") or {}).get("next")
             if not nxt:
                 return
-            # v2 'next' links are relative to the site root (they start with /wiki/...).
+            # v2 'next' links start with /wiki/...; v1 ones are relative to _links.base.
+            if not nxt.startswith(("/wiki/", "http")):
+                base = (data.get("_links") or {}).get("base") or self.site_url + "/wiki"
+                nxt = base.rstrip("/") + nxt
             data = self.get_json(nxt)

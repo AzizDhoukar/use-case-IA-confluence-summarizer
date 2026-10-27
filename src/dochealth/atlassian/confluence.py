@@ -49,30 +49,74 @@ class Confluence:
         data = self.http.get_json("/wiki/api/v2/spaces", {"keys": key})
         results = data.get("results", [])
         if not results:
-            raise AtlassianError(f"Space '{key}' not found or not accessible with this token")
+            raise AtlassianError(f"Space '{key}' not found or not accessible with this token."
+                                 + self._space_hint(key))
         return results[0]
+
+    def _space_hint(self, wanted: str) -> str:
+        """Suggest the right key when given a space name or ID (or a key without its '~')."""
+        w = wanted.strip().lower()
+        try:
+            for s in self.http.paginate("/wiki/api/v2/spaces", {"limit": 250}):
+                key, name = s.get("key", ""), s.get("name", "")
+                if w in (name.lower(), str(s.get("id")), key.lstrip("~").lower()):
+                    return f" Did you mean key '{key}' ({name})? Space keys must be quoted in YAML."
+        except AtlassianError:
+            pass
+        return " Use the space key (see the space URL: /wiki/spaces/<KEY>/...)."
+
+    def _to_page(self, item: dict, space_key: str) -> Page:
+        version = item.get("version") or {}
+        body = ((item.get("body") or {}).get("storage") or {}).get("value", "")
+        webui = (item.get("_links") or {}).get("webui", "")
+        return Page(
+            id=str(item["id"]),
+            space_key=space_key,
+            space_id=str(item.get("spaceId", "")),
+            title=item.get("title", ""),
+            url=self.wiki_base + webui if webui else "",
+            parent_id=str(item["parentId"]) if item.get("parentId") else None,
+            author_id=item.get("authorId"),
+            owner_id=item.get("ownerId"),
+            last_modifier_id=version.get("authorId"),
+            created_at=item.get("createdAt"),
+            modified_at=version.get("createdAt"),
+            version=int(version.get("number", 0)),
+            body_storage=body,
+        )
 
     def iter_pages(self, space_key: str, space_id: str, page_size: int = 100) -> Iterator[Page]:
         params = {"body-format": "storage", "limit": page_size, "status": "current"}
         for item in self.http.paginate(f"/wiki/api/v2/spaces/{space_id}/pages", params):
-            version = item.get("version") or {}
-            body = ((item.get("body") or {}).get("storage") or {}).get("value", "")
-            webui = (item.get("_links") or {}).get("webui", "")
-            yield Page(
-                id=str(item["id"]),
-                space_key=space_key,
-                space_id=str(space_id),
-                title=item.get("title", ""),
-                url=self.wiki_base + webui if webui else "",
-                parent_id=str(item["parentId"]) if item.get("parentId") else None,
-                author_id=item.get("authorId"),
-                owner_id=item.get("ownerId"),
-                last_modifier_id=version.get("authorId"),
-                created_at=item.get("createdAt"),
-                modified_at=version.get("createdAt"),
-                version=int(version.get("number", 0)),
-                body_storage=body,
-            )
+            page = self._to_page(item, space_key)
+            page.space_id = page.space_id or str(space_id)
+            yield page
+
+    def search_versions(self, cql: str, page_size: int = 100) -> Iterator[dict]:
+        """CQL search returning only {id, version, labels} (no bodies): cheap listing."""
+        params = {"cql": cql, "limit": page_size, "expand": "version,metadata.labels"}
+        for item in self.http.paginate("/wiki/rest/api/content/search", params):
+            labels = (((item.get("metadata") or {}).get("labels") or {}).get("results") or [])
+            yield {"id": str(item["id"]),
+                   "version": int((item.get("version") or {}).get("number", 0)),
+                   "labels": [lab["name"] for lab in labels]}
+
+    def get_pages(self, ids: list[str], space_key: str, batch: int = 50) -> Iterator[Page]:
+        """Fetch pages (with storage bodies) by ID, in batches."""
+        for i in range(0, len(ids), batch):
+            chunk = ids[i:i + batch]
+            params = {"id": ",".join(chunk), "body-format": "storage", "limit": len(chunk)}
+            for item in self.http.paginate("/wiki/api/v2/pages", params):
+                yield self._to_page(item, space_key)
+
+    def resolve_page_id(self, space_id: str, ref: str) -> str:
+        """Accept a page ID or an exact page title in the space."""
+        if ref.isdigit():
+            return ref
+        page = self.find_page(space_id, ref)
+        if not page:
+            raise AtlassianError(f"Page titled '{ref}' not found in space (id {space_id})")
+        return str(page["id"])
 
     def get_labels(self, page_id: str) -> list[str]:
         return [lab["name"] for lab in

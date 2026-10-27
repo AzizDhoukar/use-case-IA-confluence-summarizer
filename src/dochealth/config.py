@@ -69,6 +69,46 @@ def _merge(base: dict, override: dict) -> dict:
 
 
 @dataclass
+class SpaceScope:
+    """One space to analyze, optionally narrowed to page subtrees.
+
+    include_pages / exclude_pages hold page IDs or exact titles; each selects that page
+    and all its descendants. No include_pages means the whole space.
+    """
+    key: str
+    include_pages: list[str] = field(default_factory=list)
+    exclude_pages: list[str] = field(default_factory=list)
+
+    @property
+    def is_scoped(self) -> bool:
+        return bool(self.include_pages or self.exclude_pages)
+
+    def describe(self) -> str:
+        parts = []
+        if self.include_pages:
+            parts.append("only " + ", ".join(self.include_pages))
+        if self.exclude_pages:
+            parts.append("excluding " + ", ".join(self.exclude_pages))
+        return f"{self.key} ({'; '.join(parts)})" if parts else self.key
+
+
+def parse_scopes(raw: list) -> list[SpaceScope]:
+    scopes = []
+    for item in raw or []:
+        if isinstance(item, str):
+            scopes.append(SpaceScope(item))
+        elif isinstance(item, dict) and item.get("key"):
+            scopes.append(SpaceScope(
+                str(item["key"]),
+                [str(p) for p in item.get("include_pages") or []],
+                [str(p) for p in item.get("exclude_pages") or []]))
+        else:
+            raise ConfigError(f"config: invalid entry in 'spaces': {item!r} "
+                              "(use a space key or {key: ..., include_pages: [...]})")
+    return scopes
+
+
+@dataclass
 class Credentials:
     site_url: str
     email: str
@@ -89,8 +129,13 @@ class Config:
         return p if p.is_absolute() else self.base_dir / p
 
     @property
+    def scopes(self) -> list[SpaceScope]:
+        return [s for s in parse_scopes(self.data["spaces"])
+                if s.key not in self.data["exclude_spaces"]]
+
+    @property
     def spaces(self) -> list[str]:
-        return [s for s in self.data["spaces"] if s not in self.data["exclude_spaces"]]
+        return [s.key for s in self.scopes]
 
 
 def load_config(config_path: str | Path, env_path: str | Path | None = None,
@@ -112,6 +157,7 @@ def load_config(config_path: str | Path, env_path: str | Path | None = None,
 
     if not data["spaces"]:
         raise ConfigError("config: 'spaces' must list at least one space key")
+    parse_scopes(data["spaces"])  # validate early
     if data["triage"]["use_analytics"] not in ("auto", True, False):
         raise ConfigError("config: triage.use_analytics must be auto, true or false")
 
