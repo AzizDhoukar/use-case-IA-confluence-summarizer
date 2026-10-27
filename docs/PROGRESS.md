@@ -1,12 +1,19 @@
 # Progress log
 
 ## Status
-- Current step: Phase 1 (inventory + archive triage) code complete, 31 tests passing (mocked).
-- Waiting for: Confluence details (site, test space, report parent) to do the real
-  `run-all --dry-run --space <TEST>` and get user approval of the output.
-- Next: after Phase 1 approval, Phase 2 (duplicates & contradictions).
-- Repo: https://github.com/AzizDhoukar/use-case-IA-confluence-summarizer (work goes in via PRs;
-  user reviews and merges).
+- Phase 1 (inventory + triage): accepted by user ("more or less done") after real runs on the
+  personal space and CDP. Follow-up delivered: page-subtree selection (branch
+  `feature/subtree-selection`).
+- Phase 2 (duplicates & contradictions): code + 50 mocked tests merged into main at the user's
+  request. NOT yet run on real data: sentence-transformers/torch are not installed (the CPU
+  torch install into the /mnt/c venv failed; C: is 98% full). To do: install the deps (venv
+  on the WSL disk, e.g. ~/.venvs/dochealth), `tune-threshold` + `run-all --dry-run` on the CDP
+  subtree "Espace Team PO/CPO", user approval. Without the deps, run-all skips duplicates
+  with a warning (Phase 1 keeps working).
+- Next: Phase 3 (Jira change detection) after Phase 2 approval; needs Jira projects / JQL.
+- Repo: https://github.com/AzizDhoukar/use-case-IA-confluence-summarizer. Phase 1 landed
+  directly on main (user pushed). Later work goes on branches + PRs; pushing from this machine
+  needs `gh auth login` + `gh auth setup-git` (not done yet).
 
 ## Environment notes
 - Dev machine: Windows + WSL2 (Linux 6.6), Python 3.12.3, Claude Code CLI 2.1.310 at ~/.local/bin/claude
@@ -39,6 +46,21 @@
 - Report: new page per run; if today's title exists, a time suffix is added (never overwrite).
   Run statistics aggregate all runs since the last *published* (non-dry-run) report.
 
+- Selection: `spaces` entries may be `{key, include_pages, exclude_pages}` (page IDs or exact
+  titles, each = page + descendants); CLI `--page` / `--exclude-page` with one `--space`.
+  Scoped inventory = one CQL query (`space = K AND type = page AND (id = X OR ancestor = X)`,
+  expand version + labels) then bulk v2 `GET /pages?id=...` only for new/changed versions.
+  Verified on CDP: 144 pages, second run downloads 0 bodies. Whole-space mode unchanged.
+- Phase 2 embedding model: `paraphrase-multilingual-MiniLM-L12-v2` (content is French/mixed,
+  user choice). Its max_seq_length is 128 tokens, so a ~500-token chunk is embedded as the mean
+  of ~128-token windows. Page vector = normalized mean of chunk vectors; average-linkage
+  clustering at `duplicates.threshold`; groups > 5 split greedily around the most central page.
+- Duplicates prompt returns relationship (duplicate | overlapping | related_but_distinct);
+  related_but_distinct groups are counted but not listed. Conflicts citing pages outside the
+  cluster are dropped. Cluster signature = hash of (page id, content hash) pairs -> unchanged
+  clusters are skipped.
+- CPU-only torch (download.pytorch.org/whl/cpu) to keep the install small.
+
 ## Open points to check on the real site
 - Analytics endpoint `GET /wiki/rest/api/analytics/content/{id}/views?fromDate=YYYY-MM-DD`
   (date format and plan availability).
@@ -49,4 +71,7 @@
 - 2026-10-26: User confirmed Pro plan; Confluence details deferred. Structure proposed and approved.
 - 2026-10-27: Phase 1 implemented (config, db, Atlassian client, text, Claude CLI wrapper,
   inventory, triage, report storage+markdown, dry-run publisher, CLI), README written,
-  31 tests passing. Pushed as PR for review.
+  31 tests passing. User pushed it to main.
+- 2026-10-27: Real runs OK (personal space, CDP; page analytics available on this plan).
+  Added page-subtree selection + friendlier unknown-space error. Implemented Phase 2
+  (lazy imports so Phase 1 runs without its deps). Selection + Phase 2 merged into main.

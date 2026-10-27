@@ -14,7 +14,7 @@ your Claude subscription. The tool never calls the Anthropic API and refuses to 
 | Phase | Feature | Status |
 |---|---|---|
 | 1 | Inventory + archive triage (relevant / obsolete / duplicate / historical_record) | built |
-| 2 | Duplicates and contradictions (embeddings + clustering) | planned |
+| 2 | Duplicates and contradictions (embeddings + clustering) | built |
 | 3 | Change detection from resolved Jira issues, proposed edits as comments | planned |
 
 See `docs/BRIEF.md` for the full specification and `docs/PROGRESS.md` for status.
@@ -43,8 +43,13 @@ git clone https://github.com/AzizDhoukar/use-case-IA-confluence-summarizer.git d
 cd dochealth
 python3 -m venv .venv
 source .venv/bin/activate
+# CPU-only PyTorch first (a few hundred MB instead of several GB of CUDA libraries)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev]"
 ```
+
+The first `duplicates` run downloads the embedding model (~470 MB, from Hugging Face) into
+`~/.cache/huggingface`; after that everything runs offline on your CPU.
 
 On Debian/Ubuntu (including WSL), if `python3 -m venv` fails with "ensurepip is not
 available", install `sudo apt install python3-venv` first.
@@ -112,8 +117,10 @@ When you are happy with it, drop `--dry-run` to publish the report page.
 | `dochealth inventory` | Fetch pages of the configured spaces into `data/dochealth.sqlite` |
 | `dochealth triage` | Prefilter stale pages by rules, classify the candidates with Claude |
 | `dochealth report` | Build the report page and the Markdown copy |
-| `dochealth run-all` | inventory, then triage, then report |
-| `dochealth duplicates`, `tune-threshold`, `changes` | Phases 2 and 3 (not built yet) |
+| `dochealth duplicates` | Embed pages, group similar ones, ask Claude for contradictions and a canonical page |
+| `dochealth tune-threshold` | Print page pairs at several similarity thresholds (no LLM calls) |
+| `dochealth run-all` | inventory, triage, duplicates, then report |
+| `dochealth changes` | Phase 3 (not built yet) |
 
 Common options: `--dry-run`, `--config PATH`, `--space KEY` (repeatable, overrides config),
 `--page ID_OR_TITLE` / `--exclude-page ID_OR_TITLE` (repeatable, with a single `--space`:
@@ -137,6 +144,31 @@ Exit codes: `0` ok, `1` error, `2` configuration error, `75` Claude usage limit 
 - **Caps and limits**: a per-run call cap; if the subscription usage limit is hit, the run
   stops cleanly, everything done so far is kept, and the next run continues. The report shows
   how many candidates are still waiting.
+
+## Duplicates and contradictions
+
+1. Each in-scope page with at least `duplicates.min_chars` characters is split into
+   heading-aware chunks (~500 tokens) and embedded locally with
+   `paraphrase-multilingual-MiniLM-L12-v2` (French + English). Embeddings are stored in
+   SQLite and recomputed only when a page changes.
+2. A page vector is the mean of its chunk vectors. Pages whose cosine similarity is at least
+   `duplicates.threshold` (default 0.85) are grouped (average-linkage clustering); groups
+   bigger than 5 pages are split.
+3. Each group goes to Claude (`sonnet`) with the page texts. It returns the topic, whether the
+   pages are duplicates / overlapping / related but distinct, contradicting statements quoted
+   from each page, the page to keep (canonical) and merge notes.
+4. A group whose pages have not changed since its last analysis is not sent again.
+
+Tune the threshold on your own content before relying on it:
+
+```bash
+dochealth inventory --space CDP --page "Espace Team PO/CPO"
+dochealth tune-threshold --space CDP --page "Espace Team PO/CPO"
+```
+
+It prints, per threshold, how many pairs and groups you would get and sample pairs just above
+it. Pick the lowest threshold whose samples still look like the same topic, and set
+`duplicates.threshold`. Each group costs one Claude call.
 
 ## Page view analytics
 

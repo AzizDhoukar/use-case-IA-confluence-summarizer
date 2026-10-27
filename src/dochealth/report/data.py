@@ -29,6 +29,36 @@ class TriageRow:
 
 
 @dataclass
+class PageRef:
+    id: str
+    title: str
+    url: str
+    owner: str
+    modified: str
+
+
+@dataclass
+class Conflict:
+    page_a: PageRef
+    statement_a: str
+    page_b: PageRef
+    statement_b: str
+    explanation: str
+
+
+@dataclass
+class DuplicateCluster:
+    topic: str
+    relationship: str
+    similarity: float
+    pages: list[PageRef]
+    canonical: PageRef | None
+    canonical_reason: str
+    conflicts: list[Conflict]
+    merge_notes: str
+
+
+@dataclass
 class ReportData:
     title: str
     report_date: str
@@ -40,7 +70,9 @@ class ReportData:
     candidates: int
     pending: int
     triage: dict[str, list[TriageRow]] = field(default_factory=dict)
-    duplicates: list | None = None   # Phase 2
+    duplicates: list[DuplicateCluster] | None = None   # None = phase never run
+    duplicates_pending: int = 0
+    duplicates_distinct: int = 0     # clusters judged related_but_distinct (not listed)
     changes: list | None = None      # Phase 3
     run_stats: dict = field(default_factory=dict)
 
@@ -73,9 +105,11 @@ def collect_run_stats(db: Database, current_run_id: int | None, current: dict | 
         agg["cache_hits"] += llm.get("cache_hits", 0)
         agg["llm_failures"] += llm.get("failures", 0)
         agg["errors"] += len(s.get("errors") or []) + (s.get("triage") or {}).get("errors", 0)
-        stopped = (s.get("triage") or {}).get("stopped")
-        if stopped:
-            agg["stopped"].append(stopped)
+        agg["errors"] += (s.get("duplicates") or {}).get("errors", 0)
+        for phase in ("triage", "duplicates"):
+            stopped = (s.get(phase) or {}).get("stopped")
+            if stopped:
+                agg["stopped"].append(f"{phase}: {stopped}")
     return agg
 
 
@@ -100,6 +134,7 @@ def build_report_data(cfg: Config, db: Database, current_run_id: int | None = No
     for rows in triage.values():
         rows.sort(key=lambda r: r.confidence, reverse=True)
 
+    duplicates, dup_pending, dup_distinct = collect_duplicates(db)
     return ReportData(
         title=REPORT_TITLE.format(date=today.isoformat()),
         report_date=today.isoformat(),
@@ -111,5 +146,49 @@ def build_report_data(cfg: Config, db: Database, current_run_id: int | None = No
         candidates=len(candidates),
         pending=pending_count(db, cfg, load_prompt("triage").version),
         triage=triage,
+        duplicates=duplicates,
+        duplicates_pending=dup_pending,
+        duplicates_distinct=dup_distinct,
         run_stats=collect_run_stats(db, current_run_id, current_stats),
     )
+
+
+def page_ref(db: Database, page_id: str) -> PageRef:
+    p = db.one("SELECT * FROM pages WHERE id = ?", (page_id,))
+    if p is None:
+        return PageRef(page_id, page_id, "", "", "")
+    return PageRef(page_id, p["title"], p["url"] or "",
+                   owner_name(db, p["owner_id"], p["last_modifier_id"]),
+                   (p["modified_at"] or "")[:10])
+
+
+def collect_duplicates(db: Database) -> tuple[list[DuplicateCluster] | None, int, int]:
+    """Clusters found by the latest duplicates run."""
+    run_id = db.get_meta("duplicates_run_id")
+    if run_id is None:
+        return None, 0, 0
+    rows = db.query("SELECT * FROM clusters WHERE last_seen_run = ? ORDER BY similarity DESC",
+                    (int(run_id),))
+    clusters, pending, distinct = [], 0, 0
+    for r in rows:
+        if r["status"] != "analyzed" or not r["result_json"]:
+            pending += 1
+            continue
+        res = json.loads(r["result_json"])
+        if res["relationship"] == "related_but_distinct":
+            distinct += 1
+            continue
+        refs = {pid: page_ref(db, pid) for pid in json.loads(r["page_ids_json"])}
+        clusters.append(DuplicateCluster(
+            topic=res["topic"], relationship=res["relationship"], similarity=r["similarity"],
+            pages=list(refs.values()),
+            canonical=refs.get(res.get("canonical_page")),
+            canonical_reason=res.get("canonical_reason", ""),
+            conflicts=[Conflict(refs[c["page_a"]], c["statement_a"], refs[c["page_b"]],
+                                c["statement_b"], c["explanation"])
+                       for c in res.get("conflicts", [])
+                       if c["page_a"] in refs and c["page_b"] in refs],
+            merge_notes=res.get("merge_notes", "")))
+    # Clusters with contradictions first, then duplicates before overlaps.
+    clusters.sort(key=lambda c: (-len(c.conflicts), c.relationship != "duplicate", -c.similarity))
+    return clusters, pending, distinct

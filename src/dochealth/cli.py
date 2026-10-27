@@ -28,11 +28,11 @@ EXIT_OK, EXIT_ERROR, EXIT_CONFIG, EXIT_RATE_LIMIT = 0, 1, 2, 75
 COMMANDS = {
     "inventory": "Fetch pages of the configured spaces into the local database",
     "triage": "Classify stale/unread pages (relevant, obsolete, duplicate, historical_record)",
-    "duplicates": "Cluster similar pages and find contradictions (Phase 2, not yet built)",
-    "tune-threshold": "Print sample page pairs at several similarity thresholds (Phase 2)",
+    "duplicates": "Cluster similar pages, find contradictions, recommend a canonical page",
+    "tune-threshold": "Print sample page pairs at several similarity thresholds (no LLM)",
     "changes": "Propose edits from resolved Jira issues (Phase 3, not yet built)",
     "report": "Build the report page (+ local Markdown copy)",
-    "run-all": "inventory + triage + report",
+    "run-all": "inventory + triage + duplicates + report",
 }
 
 
@@ -97,6 +97,25 @@ def make_confluence(cfg: Config) -> Confluence | None:
                                     max_retries=cfg["atlassian"]["max_retries"]))
 
 
+PHASE2_MISSING = ("Duplicate detection needs numpy, scikit-learn and sentence-transformers. "
+                  "Install them (see README: CPU-only torch first, then pip install -e .)")
+
+
+def phase2_available() -> bool:
+    try:
+        import numpy  # noqa: F401
+        import sklearn  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def make_encoder(cfg: Config):
+    from .embeddings import SentenceTransformerEncoder  # heavy deps, loaded only when needed
+    e = cfg["embeddings"]
+    return SentenceTransformerEncoder(e["model"], e["batch_size"])
+
+
 def do_report(cfg: Config, db: Database, confluence: Confluence | None, dry_run: bool,
               run_id: int, stats: dict) -> str:
     data = build_report_data(cfg, db, run_id, stats)
@@ -142,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg.data["llm"]["max_calls_per_run"] = args.max_llm_calls
     setup_logging(cfg.path("output_dir"), args.verbose)
 
-    if args.command in ("duplicates", "tune-threshold", "changes"):
+    if args.command == "changes":
         log.error("'%s' is not implemented yet (later phase)", args.command)
         return EXIT_ERROR
 
@@ -173,6 +192,20 @@ def _run(args, cfg: Config) -> int:
                 status = "partial"
                 if stats["triage"]["stopped"] == "rate_limit":
                     code = EXIT_RATE_LIMIT
+        if args.command in ("duplicates", "tune-threshold") and not phase2_available():
+            raise ConfigError(PHASE2_MISSING)
+        if args.command == "run-all" and not phase2_available():
+            log.warning("Skipping duplicates: %s", PHASE2_MISSING)
+        elif args.command in ("duplicates", "run-all"):
+            from .phases.duplicates import run_duplicates
+            stats["duplicates"] = run_duplicates(cfg, db, llm, make_encoder(cfg), run_id)
+            if stats["duplicates"]["stopped"]:
+                status = "partial"
+                if stats["duplicates"]["stopped"] == "rate_limit":
+                    code = EXIT_RATE_LIMIT
+        if args.command == "tune-threshold":
+            from .phases.duplicates import tune_threshold
+            print(tune_threshold(cfg, db, make_encoder(cfg)))
         stats["llm"] = llm.stats.as_dict()
         if args.command in ("report", "run-all"):
             location = do_report(cfg, db, confluence, args.dry_run, run_id, stats)

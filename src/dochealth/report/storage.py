@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from html import escape
 
-from .data import ReportData
+from .data import DuplicateCluster, ReportData
 
 CATEGORY_STYLE = {
     "obsolete": ("Red", "OBSOLETE"),
@@ -52,6 +52,10 @@ def render_storage(data: ReportData, max_rows: int = 200) -> str:
         *[[lozenge(CATEGORY_STYLE[c][1], CATEGORY_STYLE[c][0]), str(counts[c])]
           for c in CATEGORY_ORDER],
         ["Candidates not yet classified", str(data.pending)],
+        ["Duplicate / overlapping page groups",
+         "not analyzed" if data.duplicates is None else str(len(data.duplicates))],
+        ["Contradictions found", "not analyzed" if data.duplicates is None
+         else str(sum(len(c.conflicts) for c in data.duplicates))],
     ]))
     if not data.analytics:
         out.append(panel("note", "<p>Page view analytics are not available on this Confluence "
@@ -85,9 +89,10 @@ def render_storage(data: ReportData, max_rows: int = 200) -> str:
             out.append(f"<p><em>{len(rows) - max_rows} more not shown (see the local "
                        "Markdown report).</em></p>")
 
-    # Later phases
     out.append("<h1>Duplicates and contradictions</h1>")
-    out.append("<p><em>Not analyzed in this run.</em></p>" if data.duplicates is None else "")
+    out.append(render_duplicates(data))
+
+    # Later phases
     out.append("<h1>Change suggestions</h1>")
     out.append("<p><em>Not analyzed in this run.</em></p>" if data.changes is None else "")
 
@@ -104,4 +109,49 @@ def render_storage(data: ReportData, max_rows: int = 200) -> str:
     ]))
     out.append("<p><em>Generated automatically by dochealth. AI-generated classifications, "
                "please verify before acting.</em></p>")
+    return "".join(out)
+
+
+RELATIONSHIP_STYLE = {"duplicate": ("Red", "DUPLICATE"), "overlapping": ("Yellow", "OVERLAP")}
+
+
+def render_duplicates(data: ReportData) -> str:
+    if data.duplicates is None:
+        return "<p><em>Not analyzed in this run.</em></p>"
+    out = ["<p>Groups of pages covering the same topic (semantic similarity), reviewed by AI for "
+           "contradicting statements. Nothing has been merged or changed: the recommendation is "
+           "for the page owners.</p>"]
+    if data.duplicates_pending:
+        out.append(panel("info", f"<p>{data.duplicates_pending} group(s) still waiting for "
+                                 "analysis; they will be processed in the next runs.</p>"))
+    if data.duplicates_distinct:
+        out.append(f"<p><em>{data.duplicates_distinct} similar group(s) were judged related but "
+                   "distinct and are not listed.</em></p>")
+    if not data.duplicates:
+        out.append("<p><em>No duplicate or overlapping pages found.</em></p>")
+    for c in data.duplicates:
+        out.append(_cluster(c))
+    return "".join(out)
+
+
+def _cluster(c: DuplicateCluster) -> str:
+    colour, label = RELATIONSHIP_STYLE.get(c.relationship, ("Grey", c.relationship.upper()))
+    conflict_badge = (" " + lozenge(f"{len(c.conflicts)} CONFLICT(S)", "Red")) if c.conflicts else ""
+    out = [f"<h2>{lozenge(label, colour)}{conflict_badge} {escape(c.topic)}</h2>"]
+    canonical_id = c.canonical.id if c.canonical else None
+    out.append(table(["Page", "Owner", "Last modified", "Recommendation"], [
+        [link(p.title, p.url), escape(p.owner), escape(p.modified),
+         lozenge("CANONICAL", "Green") if p.id == canonical_id else "merge into canonical"]
+        for p in c.pages]))
+    if c.canonical:
+        out.append(f"<p><strong>Keep:</strong> {link(c.canonical.title, c.canonical.url)}: "
+                   f"{escape(c.canonical_reason)}</p>")
+    if c.conflicts:
+        out.append(table(["Statement A", "Statement B", "Why they conflict"], [
+            [f"<em>{escape(k.statement_a)}</em><br/>({link(k.page_a.title, k.page_a.url)})",
+             f"<em>{escape(k.statement_b)}</em><br/>({link(k.page_b.title, k.page_b.url)})",
+             escape(k.explanation)] for k in c.conflicts]))
+    if c.merge_notes:
+        out.append(f"<p><strong>Merge notes:</strong> {escape(c.merge_notes)}</p>")
+    out.append(f"<p><em>Similarity {c.similarity:.2f}</em></p>")
     return "".join(out)

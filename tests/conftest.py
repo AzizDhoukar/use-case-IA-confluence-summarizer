@@ -83,3 +83,37 @@ def project(tmp_path: Path) -> Path:
         f"ATLASSIAN_SITE_URL={SITE}\nATLASSIAN_EMAIL=me@example.com\n"
         "ATLASSIAN_API_TOKEN=secret\n", encoding="utf-8")
     return tmp_path
+
+
+class FakeEncoder:
+    """Deterministic bag-of-words embeddings: texts sharing words are similar."""
+    name = "fake-bow"
+
+    def __init__(self, dim: int = 256):
+        self.dim = dim
+        self.calls = 0
+
+    def encode(self, texts):
+        import re as _re
+        import zlib
+
+        import numpy as np
+        self.calls += 1
+        out = np.zeros((len(texts), self.dim), dtype=np.float32)
+        for i, t in enumerate(texts):
+            for w in _re.findall(r"\w+", t.lower()):
+                out[i, zlib.crc32(w.encode()) % self.dim] += 1
+        norms = np.linalg.norm(out, axis=1, keepdims=True)
+        return out / np.where(norms == 0, 1, norms)
+
+
+@pytest.fixture
+def fake_encoder():
+    return FakeEncoder()
+
+
+@pytest.fixture(autouse=True)
+def no_real_encoder(monkeypatch):
+    """Never load sentence-transformers in tests."""
+    from dochealth import cli
+    monkeypatch.setattr(cli, "make_encoder", lambda cfg: FakeEncoder())

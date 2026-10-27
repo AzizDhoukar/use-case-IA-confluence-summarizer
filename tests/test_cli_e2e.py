@@ -117,3 +117,13 @@ def test_real_publish_creates_new_page_only(run, project, fake_claude):
     assert len(writes) == 1 and writes[0].request.method == "POST"
     body = json.loads(writes[0].request.body)
     assert body["parentId"] == "500" and body["body"]["representation"] == "storage"
+
+
+@responses.activate
+def test_run_all_without_phase2_deps_skips_duplicates(run, project, monkeypatch):
+    mock_confluence()
+    monkeypatch.setattr(cli, "phase2_available", lambda: False)
+    assert run("run-all", "--dry-run") == 0
+    md = next((project / "output" / "reports").glob("*.md")).read_text()
+    assert "## Duplicates and contradictions\n\n_Not analyzed in this run._" in md
+    assert run("duplicates") == cli.EXIT_ERROR

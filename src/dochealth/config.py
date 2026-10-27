@@ -44,6 +44,18 @@ DEFAULTS: dict[str, Any] = {
         "historical_labels": [],
         "historical_title_patterns": [],
     },
+    "embeddings": {
+        "model": "paraphrase-multilingual-MiniLM-L12-v2",
+        "chunk_tokens": 500,
+        "batch_size": 32,
+    },
+    "duplicates": {
+        "threshold": 0.85,
+        "max_cluster_size": 5,
+        "min_chars": 300,
+        "max_chars_per_page": 4000,
+        "tune_thresholds": [0.95, 0.9, 0.85, 0.8, 0.75, 0.7],
+    },
 }
 
 

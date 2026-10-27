@@ -76,6 +76,31 @@ CREATE TABLE IF NOT EXISTS triage (
     run_id         INTEGER,
     classified_at  TEXT NOT NULL
 );
+
+-- Phase 2: heading-aware chunks and their embeddings (float32 blobs, L2-normalized).
+CREATE TABLE IF NOT EXISTS chunks (
+    page_id      TEXT NOT NULL,
+    idx          INTEGER NOT NULL,
+    heading      TEXT,
+    text         TEXT NOT NULL,
+    content_hash TEXT NOT NULL,   -- page content hash the chunk was built from
+    model        TEXT NOT NULL,
+    embedding    BLOB NOT NULL,
+    PRIMARY KEY (page_id, idx)
+);
+
+-- Phase 2: clusters of similar pages; signature = hash of (page id, content hash) pairs.
+CREATE TABLE IF NOT EXISTS clusters (
+    signature      TEXT PRIMARY KEY,
+    page_ids_json  TEXT NOT NULL,
+    similarity     REAL,
+    status         TEXT NOT NULL,   -- pending | analyzed | failed
+    prompt_version TEXT,
+    model          TEXT,
+    result_json    TEXT,
+    analyzed_at    TEXT,
+    last_seen_run  INTEGER
+);
 """
 
 
