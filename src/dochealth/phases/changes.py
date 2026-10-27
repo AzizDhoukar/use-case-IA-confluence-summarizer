@@ -1,5 +1,6 @@
-"""Phase 3: for Jira issues done since the last run, find documentation they make outdated,
-let Claude draft replacement text, and post it as a footer comment for the page owner."""
+"""Phase 3: check Jira issues done since a date (summary, description, comments) against the
+documentation; when the docs contradict what was done, alert the page owner with a footer
+comment (with replacement text when the issue gives enough detail) and list it in the report."""
 
 from __future__ import annotations
 
@@ -30,8 +31,10 @@ def norm(text: str) -> str:
     return " ".join(text.split())
 
 
-def fingerprint(page_id: str, current: str, proposed: str) -> str:
-    return hashlib.sha256(json.dumps([page_id, norm(current), norm(proposed)],
+def fingerprint(page_id: str, doc_text: str, proposed: str, ticket_text: str = "") -> str:
+    """Identity of an alert: same page passage + same fix (or same finding when no fix)."""
+    other = norm(proposed) if proposed.strip() else "ticket:" + norm(ticket_text)
+    return hashlib.sha256(json.dumps([page_id, norm(doc_text), other],
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -39,12 +42,22 @@ def fingerprint(page_id: str, current: str, proposed: str) -> str:
 
 def fetch_issues(cfg: Config, db: Database, jira: Jira, run_id: int, stats: dict,
                  now: datetime | None = None) -> None:
-    """Store issues done since the previous fetch as 'pending' (re-done issues too)."""
+    """Store issues done since the start date as 'pending' (re-done issues too).
+
+    Start = --since (explicit re-scan) > end of the previous fetch > jira.since >
+    first_run_lookback_days. Issues already stored are not processed again.
+    """
     jcfg = cfg["jira"]
     now = now or datetime.now(timezone.utc)
-    since_iso = db.get_meta("jira_since")
-    since = (datetime.fromisoformat(since_iso) if since_iso
-             else now - timedelta(days=jcfg["first_run_lookback_days"]))
+    cursor = db.get_meta("jira_since")
+    if jcfg.get("since_override"):
+        since = datetime.fromisoformat(jcfg["since_override"]).replace(tzinfo=timezone.utc)
+    elif cursor:
+        since = datetime.fromisoformat(cursor)
+    elif jcfg["since"]:
+        since = datetime.fromisoformat(jcfg["since"]).replace(tzinfo=timezone.utc)
+    else:
+        since = now - timedelta(days=jcfg["first_run_lookback_days"])
     # One day of overlap absorbs time zones (JQL dates are in the Jira user's zone);
     # issues already stored with the same done date are ignored.
     query_since = (since - timedelta(days=1)).strftime("%Y/%m/%d %H:%M")
@@ -144,8 +157,8 @@ def excerpts_block(db: Database, matches: list[tuple], max_chars: int) -> tuple[
 def run_changes(cfg: Config, db: Database, jira: Jira, llm: ClaudeCLI, encoder: Encoder,
                 publisher: Publisher, run_id: int) -> dict:
     ccfg = cfg["changes"]
-    stats = {"fetched": 0, "new_issues": 0, "processed": 0, "skipped": 0, "no_match": 0,
-             "analyzed": 0, "cached": 0, "suggestions": 0, "repeated": 0, "rejected": 0,
+    stats = {"fetched": 0, "new_issues": 0, "comment_requests": 0, "processed": 0, "skipped": 0, "no_match": 0,
+             "analyzed": 0, "cached": 0, "discrepancies": 0, "repeated": 0, "rejected": 0,
              "low_confidence": 0, "comments": 0, "outdated": 0, "deferred": 0,
              "target_pages": 0, "pages_embedded": 0, "errors": 0, "pending": 0, "stopped": None}
     template = load_prompt("changes")
@@ -163,12 +176,20 @@ def run_changes(cfg: Config, db: Database, jira: Jira, llm: ClaudeCLI, encoder: 
         if reason:
             _mark(db, issue["key"], "skipped", reason, run_id)
             stats["skipped"] += 1
-        else:
-            issues.append(issue)
+            continue
+        if not issue.get("comments_loaded"):   # only for issues that passed the rules
+            issue["comments"] = jira.comments(issue["key"])
+            issue["comments_loaded"] = True
+            stats["comment_requests"] += 1
+            db.execute("UPDATE jira_issues SET data_json = ? WHERE key = ?",
+                       (json.dumps(issue, ensure_ascii=False), issue["key"]))
+            db.commit()
+        issues.append(issue)
     candidates = []
     if issues:   # only load the model and chunks when an issue needs them
         rows, matrix = chunk_index(cfg, db, encoder, stats)
-        texts = [Issue(**issue).text(ccfg["max_issue_chars"]) for issue in issues]
+        texts = [Issue(**issue).text(ccfg["max_issue_chars"], ccfg["max_comment_chars"])
+                 for issue in issues]
         for issue, text, vec in zip(issues, texts, encoder.encode(texts)):
             matches = top_chunks(vec, rows, matrix, ccfg["similarity_threshold"],
                                  ccfg["top_k"])
@@ -196,7 +217,7 @@ def run_changes(cfg: Config, db: Database, jira: Jira, llm: ClaudeCLI, encoder: 
             stats["errors"] += 1
             continue
         stats["cached" if llm.stats.cache_hits > hits_before else "analyzed"] += 1
-        for item in result["suggestions"]:
+        for item in result["excerpts"]:
             _store(db, issue["key"], item, by_id, ccfg["min_confidence"], run_id, stats)
         _mark(db, issue["key"], "done", None, run_id)
         stats["processed"] += 1
@@ -217,38 +238,40 @@ def _mark(db: Database, key: str, status: str, reason: str | None, run_id: int) 
 def _store(db: Database, issue_key: str, item: dict, by_id: dict, min_confidence: float,
            run_id: int, stats: dict) -> None:
     match = by_id.get(item["excerpt"])
-    if not match or not item["affected"]:
+    if not match or item["verdict"] != "discrepancy":
         return
     row, sim = match
-    current, proposed = item["current_text"].strip(), item["proposed_text"].strip()
-    # The quoted text must really be in the page, otherwise the owner cannot apply it.
-    if not current or not proposed or norm(current) == norm(proposed) \
-            or norm(current) not in norm(row["text"]):
-        log.info("Rejected suggestion for %s on page %s: current text not found in excerpt",
+    doc = item["doc_text"].strip()
+    ticket = item["ticket_text"].strip()
+    proposed = item["proposed_text"].strip()
+    # The quoted text must really be in the page, otherwise the owner cannot find it.
+    if not doc or not ticket or norm(doc) == norm(proposed) or norm(doc) not in norm(row["text"]):
+        log.info("Rejected discrepancy for %s on page %s: quoted page text not found",
                  issue_key, row["page_id"])
         stats["rejected"] += 1
         return
     status = "new" if item["confidence"] >= min_confidence else "low_confidence"
     cur = db.execute(
         "INSERT OR IGNORE INTO suggestions(fingerprint, issue_key, page_id, confidence, "
-        "similarity, current_text, proposed_text, explanation, status, created_run, last_run) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (fingerprint(row["page_id"], current, proposed), issue_key, row["page_id"],
-         item["confidence"], sim, current, proposed, item["explanation"], status, run_id, run_id))
+        "similarity, current_text, ticket_text, proposed_text, explanation, status, "
+        "created_run, last_run) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (fingerprint(row["page_id"], doc, proposed, ticket), issue_key, row["page_id"],
+         item["confidence"], sim, doc, ticket, proposed, item["explanation"], status,
+         run_id, run_id))
     db.commit()
     if cur.rowcount == 0:
         stats["repeated"] += 1
     elif status == "low_confidence":
         stats["low_confidence"] += 1
     else:
-        stats["suggestions"] += 1
+        stats["discrepancies"] += 1
 
 
 # --- 5. comments ------------------------------------------------------------
 
 def post_suggestions(cfg: Config, db: Database, publisher: Publisher, run_id: int,
                      stats: dict) -> None:
-    """Post new suggestions (and ones only written by a previous dry run) as comments."""
+    """Post new alerts (and ones only written by a previous dry run) as comments."""
     limit = cfg["changes"]["max_comments_per_run"]
     rows = db.query("SELECT * FROM suggestions WHERE status IN ('new', 'dry_run') "
                     "ORDER BY confidence DESC, id")
@@ -270,8 +293,9 @@ def post_suggestions(cfg: Config, db: Database, publisher: Publisher, run_id: in
         issue = json.loads(rec["data_json"]) if rec else {"key": s["issue_key"], "url": "",
                                                           "summary": ""}
         account = db.owner_account(page["owner_id"], page["last_modifier_id"])
-        storage = comment_storage(issue, s["current_text"], s["proposed_text"],
-                                  s["explanation"] or "", s["confidence"], account)
+        storage = comment_storage(issue, s["current_text"], s["ticket_text"] or "",
+                                  s["proposed_text"], s["explanation"] or "", s["confidence"],
+                                  account)
         cid, location = publisher.post_comment(
             s["page_id"], page["url"] or "", f"{s['issue_key']}-{s['page_id']}-{s['id']}",
             storage, {"page_title": page["title"], "issue": s["issue_key"],

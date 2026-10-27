@@ -10,7 +10,7 @@ import logging
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering
 
-from ..config import Config
+from ..config import Config, is_report_page
 from ..db import Database, utcnow
 from ..embeddings import Encoder, ensure_embeddings, page_vectors
 from ..llm import schemas
@@ -28,7 +28,7 @@ def eligible_pages(db: Database, cfg: Config) -> list:
     rows = db.query("SELECT * FROM pages WHERE active = 1 AND space_key IN (%s) ORDER BY id"
                     % ",".join("?" * len(cfg.spaces)), cfg.spaces)
     return [r for r in rows
-            if len(r["body_text"]) >= dcfg["min_chars"]
+            if len(r["body_text"]) >= dcfg["min_chars"] and not is_report_page(r["title"])
             and not exclude & {lab.lower() for lab in json.loads(r["labels_json"])}]
 
 

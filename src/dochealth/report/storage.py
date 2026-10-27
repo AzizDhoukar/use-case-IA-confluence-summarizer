@@ -64,9 +64,9 @@ def render_storage(data: ReportData, max_rows: int = 200) -> str:
         ["Candidates not yet classified", str(data.pending)],
         ["Duplicate / overlapping page groups",
          "not analyzed" if data.duplicates is None else str(len(data.duplicates))],
-        ["Contradictions found", "not analyzed" if data.duplicates is None
-         else str(sum(len(c.conflicts) for c in data.duplicates))],
-        ["Suggested edits (from Jira)", "not analyzed" if data.changes is None
+        ["Contradictions found", "not analyzed" if data.contradictions is None
+         else str(data.contradictions)],
+        ["Discrepancies with Jira", "not analyzed" if data.changes is None
          else str(sum(1 for c in data.changes if c.status in ("posted", "dry_run")))],
     ]))
     out.append("<h2>Categories</h2>")
@@ -107,8 +107,10 @@ def render_storage(data: ReportData, max_rows: int = 200) -> str:
 
     out.append("<h1>Duplicates and contradictions</h1>")
     out.append(render_duplicates(data))
+    out.append("<h2>Contradictions between pages</h2>")
+    out.append(render_page_conflicts(data))
 
-    out.append("<h1>Change suggestions</h1>")
+    out.append("<h1>Jira vs documentation: discrepancies</h1>")
     out.append(render_changes(data))
 
     # Run statistics
@@ -146,6 +148,26 @@ def render_duplicates(data: ReportData) -> str:
         out.append("<p><em>No duplicate or overlapping pages found.</em></p>")
     for c in data.duplicates:
         out.append(_cluster(c))
+    return "".join(out)
+
+
+def render_page_conflicts(data: ReportData) -> str:
+    if data.page_conflicts is None:
+        return "<p><em>Not analyzed in this run.</em></p>"
+    out = ["<p>Sections of different pages that describe the same thing, checked by AI for "
+           "contradicting statements (pages already grouped above are not repeated here).</p>"]
+    if data.page_conflicts_pending:
+        out.append(panel("info", f"<p>{data.page_conflicts_pending} page pair(s) still waiting "
+                                 "for analysis; they will be processed in the next runs.</p>"))
+    if not data.page_conflicts:
+        out.append("<p><em>No contradiction found.</em></p>")
+        return "".join(out)
+    out.append(table(["Page A says", "Page B says", "What differs", "Owners"], [
+        [f"<em>{escape(k.statement_a)}</em><br/>({link(k.page_a.title, k.page_a.url)})",
+         f"<em>{escape(k.statement_b)}</em><br/>({link(k.page_b.title, k.page_b.url)})",
+         escape(k.explanation),
+         escape(", ".join(dict.fromkeys(o for o in (k.page_a.owner, k.page_b.owner) if o)))]
+        for k in data.page_conflicts]))
     return "".join(out)
 
 
@@ -187,29 +209,38 @@ def _lines(text: str) -> str:
     return "<br/>".join(escape(line) for line in text.splitlines())
 
 
-def comment_storage(issue: dict, current: str, proposed: str, explanation: str,
-                    confidence: float, account_id: str | None) -> str:
-    """Footer comment proposing an edit (the page itself is never modified)."""
+def comment_storage(issue: dict, doc_text: str, ticket_text: str, proposed: str,
+                    explanation: str, confidence: float, account_id: str | None) -> str:
+    """Footer comment flagging a discrepancy with a Jira issue (the page is never modified)."""
     mention = (f'<ac:link><ri:user ri:account-id="{escape(account_id)}" /></ac:link> '
                if account_id else "")
     summary = f" ({escape(issue.get('summary', ''))})" if issue.get("summary") else ""
-    return (f"<p>{mention}The Jira issue {link(issue['key'], issue.get('url', ''))}{summary} "
-            "may make this page outdated. Suggested edit:</p>"
-            "<p><strong>Current text:</strong></p>"
-            f"<blockquote><p>{_lines(current)}</p></blockquote>"
-            "<p><strong>Proposed text:</strong></p>"
-            f"<blockquote><p>{_lines(proposed)}</p></blockquote>"
-            f"<p><strong>Why:</strong> {escape(explanation)} (confidence {confidence:.2f})</p>"
-            f"<p><em>{AI_NOTICE}</em></p>")
+    out = [f"<p>{mention}This page may no longer match the Jira issue "
+           f"{link(issue['key'], issue.get('url', ''))}{summary}.</p>",
+           "<p><strong>The page says:</strong></p>",
+           f"<blockquote><p>{_lines(doc_text)}</p></blockquote>"]
+    if ticket_text:
+        out += ["<p><strong>The Jira issue says:</strong></p>",
+                f"<blockquote><p>{_lines(ticket_text)}</p></blockquote>"]
+    if proposed:
+        out += ["<p><strong>Proposed text:</strong></p>",
+                f"<blockquote><p>{_lines(proposed)}</p></blockquote>"]
+    else:
+        out.append("<p><strong>Proposed text:</strong> the issue does not give enough detail; "
+                   "please check and update this passage.</p>")
+    out += [f"<p><strong>Why:</strong> {escape(explanation)} (confidence {confidence:.2f})</p>",
+            f"<p><em>{AI_NOTICE}</em></p>"]
+    return "".join(out)
 
 
 def render_changes(data: ReportData) -> str:
     if data.changes is None:
         return "<p><em>Not analyzed in this run.</em></p>"
     cs = data.changes_summary
-    out = ["<p>Jira issues completed since the previous run were compared with the "
-           "documentation. Where an issue makes a passage outdated, a replacement was drafted "
-           "and posted as a comment for the page owner. Pages are never edited.</p>",
+    out = ["<p>Jira issues done since the start date (summary, description and comments) were "
+           "compared with the documentation. Each discrepancy is listed here and posted as a "
+           "comment for the page owner, with replacement text when the issue gives enough "
+           "detail. Pages are never edited.</p>",
            table(["Jira issues", "Count"], [
                ["Handled in this run", str(cs.issues_fetched)],
                ["Skipped by rules (sub-tasks, abandoned...)", str(cs.issues_skipped)],
@@ -218,9 +249,10 @@ def render_changes(data: ReportData) -> str:
                ["Waiting for the next run", str(cs.issues_pending)],
            ])]
     if not data.changes:
-        out.append("<p><em>No documentation update suggested.</em></p>")
+        out.append("<p><em>No discrepancy found.</em></p>")
         return "".join(out)
-    out.append(table(["Jira issue", "Page", "Owner", "Confidence", "Status", "Suggestion"],
+    out.append(table(["Jira issue", "Page", "Owner", "The page says", "The issue says",
+                      "Proposed text", "Confidence", "Status"],
                      [_change_row(c) for c in data.changes]))
     return "".join(out)
 
@@ -232,6 +264,8 @@ def _change_row(c: ChangeRow) -> list[str]:
         status += f'<br/><a href="{escape(c.location)}">comment</a>'
     return [link(c.issue_key, c.issue_url) + (f"<br/>{escape(c.issue_summary)}"
                                               if c.issue_summary else ""),
-            link(c.page.title, c.page.url), escape(c.page.owner), f"{c.confidence:.2f}", status,
-            f"<em>{escape(c.current_text)}</em><br/>&#8594; {escape(c.proposed_text)}"
-            f"<br/>{escape(c.explanation)}"]
+            link(c.page.title, c.page.url), escape(c.page.owner),
+            f"<em>{escape(c.current_text)}</em>",
+            escape(c.ticket_text) + f"<br/><small>{escape(c.explanation)}</small>",
+            escape(c.proposed_text) or "<em>to be written by the owner</em>",
+            f"{c.confidence:.2f}", status]

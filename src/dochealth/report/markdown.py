@@ -29,9 +29,9 @@ def render_markdown(data: ReportData) -> str:
         ["Candidates not yet classified", data.pending],
         ["Duplicate / overlapping page groups",
          "not analyzed" if data.duplicates is None else len(data.duplicates)],
-        ["Contradictions found", "not analyzed" if data.duplicates is None
-         else sum(len(c.conflicts) for c in data.duplicates)],
-        ["Suggested edits (from Jira)", "not analyzed" if data.changes is None
+        ["Contradictions found", "not analyzed" if data.contradictions is None
+         else data.contradictions],
+        ["Discrepancies with Jira", "not analyzed" if data.changes is None
          else sum(1 for c in data.changes if c.status in ("posted", "dry_run"))],
     ])
     out += ["### Categories", ""]
@@ -56,7 +56,8 @@ def render_markdown(data: ReportData) -> str:
                         r.modified, f"{r.confidence:.2f}", r.reason] for r in rows])
 
     out += ["## Duplicates and contradictions", ""] + _duplicates(data)
-    out += ["## Change suggestions", ""] + _changes(data)
+    out += ["### Contradictions between pages", ""] + _page_conflicts(data)
+    out += ["## Jira vs documentation: discrepancies", ""] + _changes(data)
 
     out += ["## Run statistics", ""]
     out += _table(["Metric", "Value"], [
@@ -73,6 +74,20 @@ def render_markdown(data: ReportData) -> str:
 
 def _link(p) -> str:
     return f"[{_cell(p.title)}]({p.url})" if p.url else _cell(p.title)
+
+
+def _page_conflicts(data: ReportData) -> list[str]:
+    if data.page_conflicts is None:
+        return ["_Not analyzed in this run._", ""]
+    out = []
+    if data.page_conflicts_pending:
+        out += [f"> {data.page_conflicts_pending} page pair(s) still waiting for analysis.", ""]
+    if not data.page_conflicts:
+        return out + ["_No contradiction found._", ""]
+    return out + _table(["Page A says", "Page B says", "What differs", "Owners"], [
+        [f"_{k.statement_a}_ ({_link(k.page_a)})", f"_{k.statement_b}_ ({_link(k.page_b)})",
+         k.explanation, ", ".join(dict.fromkeys(o for o in (k.page_a.owner, k.page_b.owner) if o))]
+        for k in data.page_conflicts])
 
 
 def _duplicates(data: ReportData) -> list[str]:
@@ -119,7 +134,7 @@ def _changes(data: ReportData) -> list[str]:
         ["Waiting for the next run", cs.issues_pending],
     ])
     if not data.changes:
-        return out + ["_No documentation update suggested._", ""]
+        return out + ["_No discrepancy found._", ""]
     for c in data.changes:
         issue = f"[{c.issue_key}]({c.issue_url})" if c.issue_url else c.issue_key
         status = CHANGE_STYLE.get(c.status, ("", c.status.upper()))[1]
@@ -127,7 +142,10 @@ def _changes(data: ReportData) -> list[str]:
         out += [f"### {issue} → {_link(c.page)}", "",
                 f"{c.issue_summary}  ", f"Owner: {c.page.owner} · confidence {c.confidence:.2f}"
                 f" · **{status}**{where}", "",
-                "**Current text:**", "", *[f"> {ln}" for ln in c.current_text.splitlines()], "",
-                "**Proposed text:**", "", *[f"> {ln}" for ln in c.proposed_text.splitlines()], "",
+                "**The page says:**", "", *[f"> {ln}" for ln in c.current_text.splitlines()], "",
+                "**The issue says:**", "", *[f"> {ln}" for ln in c.ticket_text.splitlines()], "",
+                "**Proposed text:**", "",
+                *([f"> {ln}" for ln in c.proposed_text.splitlines()] or
+                  ["_to be written by the owner_"]), "",
                 f"**Why:** {c.explanation}", ""]
     return out

@@ -9,7 +9,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from ..atlassian.confluence import Confluence
-from ..config import Config
+from ..config import Config, is_report_page
 from ..db import Database, utcnow
 from ..llm import schemas
 from ..llm.claude_cli import BudgetExhausted, ClaudeCLI, LLMError, RateLimitReached
@@ -43,7 +43,8 @@ def date_stale_pages(db: Database, cfg: Config) -> list:
     cutoff = _days_ago(cfg["triage"]["stale_modified_days"])
     rows = db.query("SELECT * FROM pages WHERE active = 1 AND space_key IN (%s) ORDER BY modified_at"
                     % ",".join("?" * len(cfg.spaces)), cfg.spaces)
-    return [r for r in rows if (_parse_ts(r["modified_at"]) or datetime.now(timezone.utc)) < cutoff]
+    return [r for r in rows if not is_report_page(r["title"])
+            and (_parse_ts(r["modified_at"]) or datetime.now(timezone.utc)) < cutoff]
 
 
 def current_candidates(db: Database, cfg: Config) -> list:

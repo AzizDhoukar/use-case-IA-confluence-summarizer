@@ -32,11 +32,13 @@ class Issue:
     description: str
     fix_versions: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
+    comments: list[str] = field(default_factory=list)   # most recent first
+    comments_loaded: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def text(self, max_chars: int | None = None) -> str:
+    def text(self, max_chars: int | None = None, max_comment_chars: int = 3000) -> str:
         """Plain-text form used both for embeddings and for the prompt."""
         head = [f"[{self.key}] {self.summary}",
                 f"Type: {self.type} | Status: {self.status}"
@@ -50,6 +52,16 @@ class Issue:
             parts.append("Description:\n" + desc)
         if self.links:
             parts.append("Linked issues:\n" + "\n".join(f"- {link}" for link in self.links))
+        kept, used = [], 0
+        for comment in self.comments:
+            if kept and used + len(comment) > max_comment_chars:
+                break
+            kept.append(comment[:max_comment_chars])
+            used += len(kept[-1])
+        if kept:
+            skipped = len(self.comments) - len(kept)
+            parts.append("Comments (most recent first):\n" + "\n".join(f"- {c}" for c in kept)
+                         + (f"\n[{skipped} older comment(s) not shown]" if skipped else ""))
         return "\n\n".join(parts)
 
 
@@ -134,6 +146,24 @@ class Jira:
             if data.get("isLast", True) or not token:
                 return
             body["nextPageToken"] = token
+
+    def comments(self, key: str, page_size: int = 100) -> list[str]:
+        """All comments of an issue as 'Author, YYYY-MM-DD: text', most recent first."""
+        out, start = [], 0
+        while True:
+            data = self.http.get_json(f"/rest/api/3/issue/{key}/comment",
+                                      {"startAt": start, "maxResults": page_size,
+                                       "orderBy": "-created"})
+            items = data.get("comments", [])
+            for c in items:
+                text = adf_to_text(c.get("body")) if isinstance(c.get("body"), dict) \
+                    else str(c.get("body") or "")
+                if text:
+                    author = (c.get("author") or {}).get("displayName", "?")
+                    out.append(f"{author}, {(c.get('created') or '')[:10]}: {text}")
+            start += len(items)
+            if not items or start >= data.get("total", 0):
+                return out
 
     def done_issues(self, jql: str, date_field: str, since: str,
                     page_size: int = 100) -> Iterator[Issue]:

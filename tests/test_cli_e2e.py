@@ -136,9 +136,13 @@ def test_run_all_with_jira_dry_run_never_writes(run, project):
         "summary": "Use the v2 endpoint", "issuetype": {"name": "Story", "subtask": False},
         "status": {"name": "Done"}, "statuscategorychangedate": "2026-10-26T10:00:00.000+0100"}}],
         "isLast": True})
-    assert run("run-all", "--dry-run", "--jql", "project = CDP") == 0
+    responses.get(f"{SITE}/rest/api/3/issue/CDP-1/comment", json={"comments": [], "total": 0})
+    assert run("run-all", "--dry-run", "--jql", "project = CDP", "--since", "2026-10-01") == 0
     writes = [c for c in responses.calls if c.request.method != "GET"
               and not c.request.url.endswith(("/users-bulk", "/rest/api/3/search/jql"))]
+    jql = json.loads(next(c for c in responses.calls if "search/jql" in c.request.url)
+                     .request.body)["jql"]
+    assert '>= "2026/09/30 00:00"' in jql
     assert writes == []
     md = next((project / "output" / "reports").glob("*.md")).read_text()
     assert "| Handled in this run | 1 |" in md and "| No related documentation | 1 |" in md
@@ -146,3 +150,7 @@ def test_run_all_with_jira_dry_run_never_writes(run, project):
 
 def test_changes_needs_jql(run, project):
     assert run("changes", "--dry-run") == cli.EXIT_ERROR
+
+
+def test_bad_since_date(run):
+    assert run("changes", "--since", "01/10/2026") == cli.EXIT_CONFIG

@@ -102,6 +102,21 @@ CREATE TABLE IF NOT EXISTS clusters (
     last_seen_run  INTEGER
 );
 
+-- Phase 2: pairs of close passages from different pages, checked for contradictions.
+CREATE TABLE IF NOT EXISTS passage_pairs (
+    signature      TEXT PRIMARY KEY,   -- hash of both passages (page id + text)
+    page_a         TEXT NOT NULL,
+    page_b         TEXT NOT NULL,
+    passages_json  TEXT NOT NULL,      -- [[chunk idx a, chunk idx b, similarity], ...]
+    similarity     REAL,
+    status         TEXT NOT NULL,      -- pending | analyzed | failed
+    prompt_version TEXT,
+    model          TEXT,
+    result_json    TEXT,
+    analyzed_at    TEXT,
+    last_seen_run  INTEGER
+);
+
 -- Phase 3: Jira issues done since the last run, processed once each.
 CREATE TABLE IF NOT EXISTS jira_issues (
     key            TEXT PRIMARY KEY,
@@ -122,8 +137,9 @@ CREATE TABLE IF NOT EXISTS suggestions (
     page_id        TEXT NOT NULL,
     confidence     REAL NOT NULL,
     similarity     REAL,
-    current_text   TEXT NOT NULL,
-    proposed_text  TEXT NOT NULL,
+    current_text   TEXT NOT NULL,   -- what the page says (exact quote)
+    ticket_text    TEXT,            -- what the Jira issue says was done
+    proposed_text  TEXT NOT NULL,   -- may be '' when the issue lacks details
     explanation    TEXT,
     status         TEXT NOT NULL,   -- new | dry_run | posted | low_confidence | outdated | duplicate
     comment_id     TEXT,
@@ -134,6 +150,9 @@ CREATE TABLE IF NOT EXISTS suggestions (
 );
 CREATE INDEX IF NOT EXISTS idx_suggestions_page ON suggestions(page_id, issue_key);
 """
+
+
+MIGRATIONS = [("suggestions", "ticket_text", "TEXT")]
 
 
 def utcnow() -> str:
@@ -149,7 +168,15 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a database was created."""
+        for table, column, decl in MIGRATIONS:
+            cols = {r["name"] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         self.conn.close()

@@ -7,11 +7,19 @@
 - Phase 2 (duplicates & contradictions): accepted by user ("phase 2 is ok"). torch 2.14.1+cpu
   and sentence-transformers 6.2.0 work in the /mnt/c .venv (importing torch from /mnt/c takes
   ~3 min per run; a venv on the WSL disk would be faster).
-- Phase 3 (Jira change detection): built on branch `feature/phase-3-changes`, 62 tests pass.
-  Dry-run validated on a scratch copy (CDP subtree "Espace Team PO/CPO", JQL
-  `project = CDP AND statusCategory = Done`, 30 days): 138 issues -> 42 after rules -> 21 above
-  0.65 -> 10 analyzed by sonnet (cap), 0 affected (verdicts reasonable). Awaiting user approval.
-  The user's own config.yaml has no `jira` block yet.
+- Phase 3 (Jira change detection): built on branch `feature/phase-3-changes`. First version
+  validated on a scratch copy of CDP "Espace Team PO/CPO". Then reworked at the user's request:
+  Jira from a start date (`jira.since` / `--since`), issue comments, verdict
+  consistent | discrepancy | unrelated with "page says / issue says / proposed text (optional)",
+  alerts = report section + owner comment. Plus section-level contradictions between pages
+  (`phases/conflicts.py`, runs with `duplicates`). 74 tests pass. Real dry run on the personal
+  space only: 213 CDP issues since 2026-09-01 -> 61 after rules -> 6 analyzed (cap), all
+  unrelated; duplicates found a real contradiction between the two ngrok pages (.env
+  variables). Awaiting user approval; the user runs it on CDP themselves.
+- **Testing rule (user, 2026-10-27): real runs by Claude only on the personal space
+  `~7120202e66b1f59d6249ea8d6ed85d67c677b5`; tests on team spaces are done by the user.**
+- The tool ignores its own report pages (title "Documentation Health Report – ...") in triage,
+  duplicates, conflicts and Jira matching (they were being analyzed in the personal space).
 - Report: triage sections now ordered relevant, duplicate, obsolete, historical, with a
   category definitions table after the summary (user request).
 - Repo: https://github.com/AzizDhoukar/use-case-IA-confluence-summarizer. Phase 1 landed
@@ -77,6 +85,10 @@
   also skipped if the same issue already has a posted comment on the page; re-checked against the
   current page text before posting (status outdated). Dry-run writes comments to
   output/dry-run/<stamp>/comments and marks dry_run; a later real run posts them.
+- Section-level conflicts: chunk x chunk cosine across different pages (blockwise), grouped by
+  page pair (top 2 passage pairs), pairs already in a Phase 2 cluster skipped, one sonnet call
+  per page pair (`prompts/conflicts.md`), statements must be literal in the passages.
+  Table `passage_pairs`, signature = hash of both passages -> unchanged pairs not re-sent.
 - Similarity of issue vs chunk with the multilingual MiniLM is compressed (0.49-0.77 on CDP):
   default threshold 0.65.
 
@@ -97,3 +109,5 @@
 - 2026-10-27: Phase 2 accepted. Phase 3 implemented (Jira client, change detection, footer
   comments via publisher, report section), validated with capped dry runs on a scratch DB.
   Report: category order + definitions.
+- 2026-10-27: Phase 3 reworked (since date, comments, discrepancies, alerts) + section-level
+  page contradictions; own report pages excluded. Real tests restricted to the personal space.

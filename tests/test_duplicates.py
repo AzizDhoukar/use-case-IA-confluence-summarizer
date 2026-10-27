@@ -139,3 +139,13 @@ def test_report_category_order_and_definitions(db, project):
         assert positions == sorted(positions)
         assert "Categories" in text and "Worth keeping as a record" in text
         assert text.index("Categories") < text.index("Archive triage")
+
+
+def test_own_report_pages_are_never_analyzed(db, project):
+    from dochealth.phases.duplicates import eligible_pages
+    from dochealth.phases.triage import date_stale_pages
+    seed(db)
+    add(db, "9", "Documentation Health Report – 2026-10-27 (15:02:41)", VPN)
+    cfg = load_config(project / "config.yaml")
+    assert "9" not in [p["id"] for p in eligible_pages(db, cfg)]
+    assert "9" not in [p["id"] for p in date_stale_pages(db, cfg)]

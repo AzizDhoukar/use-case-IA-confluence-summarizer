@@ -45,28 +45,53 @@ DUPLICATES = {
     "additionalProperties": False,
 }
 
+CONFLICTS = {
+    "type": "object",
+    "properties": {
+        "conflicts": {
+            "type": "array",
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "statement_a": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    "statement_b": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    "explanation": {"type": "string", "minLength": 1, "maxLength": 400},
+                },
+                "required": ["statement_a", "statement_b", "explanation"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["conflicts"],
+    "additionalProperties": False,
+}
+
+CHANGE_VERDICTS = ["consistent", "discrepancy", "unrelated"]
+
 CHANGES = {
     "type": "object",
     "properties": {
-        "suggestions": {
+        "excerpts": {
             "type": "array",
             "maxItems": 5,
             "items": {
                 "type": "object",
                 "properties": {
                     "excerpt": {"type": "string"},
-                    "affected": {"type": "boolean"},
+                    "verdict": {"type": "string", "enum": CHANGE_VERDICTS},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                    "current_text": {"type": "string", "maxLength": 1500},
+                    "doc_text": {"type": "string", "maxLength": 1500},
+                    "ticket_text": {"type": "string", "maxLength": 1500},
                     "proposed_text": {"type": "string", "maxLength": 3000},
                     "explanation": {"type": "string", "maxLength": 600},
                 },
-                "required": ["excerpt", "affected", "confidence", "current_text",
+                "required": ["excerpt", "verdict", "confidence", "doc_text", "ticket_text",
                              "proposed_text", "explanation"],
                 "additionalProperties": False,
             },
         },
     },
-    "required": ["suggestions"],
+    "required": ["excerpts"],
     "additionalProperties": False,
 }

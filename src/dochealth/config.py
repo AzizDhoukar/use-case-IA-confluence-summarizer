@@ -58,9 +58,18 @@ DEFAULTS: dict[str, Any] = {
     },
     "jira": {
         "jql": "",                     # empty = change detection disabled
+        "since": None,                 # YYYY-MM-DD: first run starts here
         "date_field": "statusCategoryChangedDate",
         "first_run_lookback_days": 30,
         "page_size": 100,
+    },
+    "conflicts": {
+        "enabled": True,
+        "passage_threshold": 0.8,
+        "max_passages_per_pair": 2,
+        "max_calls_per_run": 10,
+        "max_chars_per_passage": 2000,
+        "tune_thresholds": [0.95, 0.9, 0.85, 0.8, 0.75],
     },
     "changes": {
         "skip_subtasks": True,
@@ -76,11 +85,28 @@ DEFAULTS: dict[str, Any] = {
         "min_confidence": 0.7,
         "max_comments_per_run": 10,
         "max_issue_chars": 3000,
+        "max_comment_chars": 3000,
         "max_chars_per_excerpt": 2000,
     },
 }
 
 DATE_FIELDS = ("statusCategoryChangedDate", "resolved", "updated")
+
+REPORT_TITLE = "Documentation Health Report – {date}"
+
+
+def is_report_page(title: str) -> bool:
+    """The tool's own report pages are never analyzed as documentation."""
+    return title.startswith(REPORT_TITLE.split("{")[0])
+
+
+def parse_since(value: str) -> str:
+    """Validate a YYYY-MM-DD start date (config jira.since or --since)."""
+    from datetime import date
+    try:
+        return date.fromisoformat(value.strip()).isoformat()
+    except ValueError:
+        raise ConfigError(f"invalid date '{value}' (expected YYYY-MM-DD)") from None
 
 
 def check_no_api_key(environ: dict[str, str] | None = None) -> None:
@@ -196,6 +222,8 @@ def load_config(config_path: str | Path, env_path: str | Path | None = None,
     parse_scopes(data["spaces"])  # validate early
     if data["triage"]["use_analytics"] not in ("auto", True, False):
         raise ConfigError("config: triage.use_analytics must be auto, true or false")
+    if data["jira"]["since"]:
+        data["jira"]["since"] = parse_since(str(data["jira"]["since"]))
     if data["jira"]["date_field"] not in DATE_FIELDS:
         raise ConfigError(f"config: jira.date_field must be one of {', '.join(DATE_FIELDS)}")
 

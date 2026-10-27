@@ -12,7 +12,7 @@ from pathlib import Path
 from .atlassian.confluence import Confluence
 from .atlassian.http import AtlassianError, AtlassianHTTP
 from .atlassian.jira import Jira
-from .config import Config, ConfigError, check_no_api_key, load_config
+from .config import Config, ConfigError, check_no_api_key, load_config, parse_since
 from .db import Database
 from .llm.claude_cli import ClaudeCLI, LLMError
 from .phases.inventory import run_inventory
@@ -29,7 +29,8 @@ EXIT_OK, EXIT_ERROR, EXIT_CONFIG, EXIT_RATE_LIMIT = 0, 1, 2, 75
 COMMANDS = {
     "inventory": "Fetch pages of the configured spaces into the local database",
     "triage": "Classify stale/unread pages (relevant, obsolete, duplicate, historical_record)",
-    "duplicates": "Cluster similar pages, find contradictions, recommend a canonical page",
+    "duplicates": "Cluster similar pages (canonical page, contradictions), then check close "
+                  "sections of different pages for contradictions",
     "tune-threshold": "Print sample page pairs at several similarity thresholds (no LLM)",
     "changes": "Propose page edits from Jira issues done since the last run (comments)",
     "report": "Build the report page (+ local Markdown copy)",
@@ -53,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="skip this page and its descendants (repeatable; needs one --space)")
         sp.add_argument("--max-llm-calls", type=int, help="override llm.max_calls_per_run")
         sp.add_argument("--jql", help="override jira.jql (change detection)")
+        sp.add_argument("--since", metavar="YYYY-MM-DD",
+                        help="read Jira issues done since this date (re-scan; issues already "
+                             "checked are not sent to Claude again)")
         sp.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -162,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
         cfg.data["llm"]["max_calls_per_run"] = args.max_llm_calls
     if args.jql:
         cfg.data["jira"]["jql"] = args.jql
+    if args.since:
+        try:
+            cfg.data["jira"]["since_override"] = parse_since(args.since)
+        except ConfigError as exc:
+            print(f"--since: {exc}", file=sys.stderr)
+            return EXIT_CONFIG
     setup_logging(cfg.path("output_dir"), args.verbose)
 
     try:
@@ -206,15 +216,21 @@ def _run(args, cfg: Config) -> int:
         if args.command == "run-all" and not phase2_available():
             log.warning("Skipping duplicates: %s", PHASE2_MISSING)
         elif args.command in ("duplicates", "run-all"):
+            from .phases.conflicts import run_conflicts
             from .phases.duplicates import run_duplicates
             stats["duplicates"] = run_duplicates(cfg, db, llm, encoder(), run_id)
-            if stats["duplicates"]["stopped"]:
-                status = "partial"
-                if stats["duplicates"]["stopped"] == "rate_limit":
-                    code = EXIT_RATE_LIMIT
+            stats["conflicts"] = run_conflicts(cfg, db, llm, encoder(), run_id)
+            for phase in ("duplicates", "conflicts"):
+                if stats[phase]["stopped"]:
+                    status = "partial"
+                    if stats[phase]["stopped"] == "rate_limit":
+                        code = EXIT_RATE_LIMIT
         if args.command == "tune-threshold":
             from .phases.duplicates import tune_threshold
+            from .phases.conflicts import tune_passages
             print(tune_threshold(cfg, db, encoder()))
+            print()
+            print(tune_passages(cfg, db, encoder()))
         if args.command == "changes" and not cfg["jira"]["jql"]:
             raise ConfigError("config: jira.jql is required for change detection "
                               "(e.g. 'project = CDP AND statusCategory = Done')")

@@ -41,25 +41,36 @@ UNRELATED = issue("CDP-3", "Kubernetes nodes autoscaling", "Raise EKS node group
 
 
 class FakeJira:
-    def __init__(self, issues):
+    def __init__(self, issues, comments=None):
         self.issues = issues
         self.calls = []
+        self.comment_calls = []
+        self.comment_map = comments or {}
 
     def done_issues(self, jql, date_field, since, page_size=100):
         self.calls.append((jql, date_field, since))
         return list(self.issues)
 
+    def comments(self, key):
+        self.comment_calls.append(key)
+        return self.comment_map.get(key, [])
+
+
+def item(excerpt="E1", verdict="discrepancy", confidence=0.9, doc=CURRENT,
+         ticket="Le portail est remplacé par vpn2.example.com.",
+         proposed="utiliser le portail vpn2.example.com avec son compte Decade.",
+         explanation="Le portail VPN a changé d'adresse (CDP-1)."):
+    return {"excerpt": excerpt, "verdict": verdict, "confidence": confidence, "doc_text": doc,
+            "ticket_text": ticket, "proposed_text": proposed, "explanation": explanation}
+
 
 def answer(prompt):
-    return {"suggestions": [
-        {"excerpt": "E1", "affected": True, "confidence": 0.9, "current_text": CURRENT,
-         "proposed_text": "utiliser le portail vpn2.example.com avec son compte Decade.",
-         "explanation": "Le portail VPN a changé d'adresse (CDP-1)."},
-        {"excerpt": "E1", "affected": True, "confidence": 0.95,
-         "current_text": "Texte inventé qui n'est pas dans la page.",
-         "proposed_text": "x", "explanation": "hallucination"},
-        {"excerpt": "E9", "affected": False, "confidence": 0.1, "current_text": "",
-         "proposed_text": "", "explanation": "non concerné"},
+    return {"excerpts": [
+        item(),
+        item(confidence=0.95, doc="Texte inventé qui n'est pas dans la page.", proposed="x",
+             explanation="hallucination"),
+        item("E9", "unrelated", 0.1, "", "", "", "non concerné"),
+        item("E1", "consistent", 0.05, "", "", "", "rien à changer"),
     ]}
 
 
@@ -152,7 +163,8 @@ def test_dry_run_then_post_once(db, project, fake_claude, fake_encoder, tmp_path
     dry = Publisher(None, True, tmp_path / "out")
     stats = run_changes(cfg, db, jira, ClaudeCLI(db, runner=fake_claude), fake_encoder, dry, 1)
     assert stats["skipped"] == 1 and stats["no_match"] == 1 and stats["analyzed"] == 1
-    assert stats["suggestions"] == 1 and stats["rejected"] == 1 and stats["comments"] == 1
+    assert stats["discrepancies"] == 1 and stats["rejected"] == 1 and stats["comments"] == 1
+    assert jira.comment_calls == ["CDP-1", "CDP-3"]          # not for the skipped sub-task
     assert len(fake_claude.calls) == 1
     prompt = fake_claude.calls[0]["input"]
     assert '<excerpt id="E1" page="Accès VPN"' in prompt and "CDP-1" in prompt
@@ -171,7 +183,7 @@ def test_dry_run_then_post_once(db, project, fake_claude, fake_encoder, tmp_path
     data = build_report_data(cfg, db)
     assert [c.status for c in data.changes] == ["dry_run"]
     assert "DRY RUN" in render_storage(data)
-    assert "Suggested edits (from Jira) | 1" in render_markdown(data)
+    assert "Discrepancies with Jira | 1" in render_markdown(data)
 
     # A real run later posts the dry-run suggestion, exactly once.
     with responses.RequestsMock() as rsps:
@@ -203,7 +215,7 @@ def test_same_suggestion_from_another_issue_is_not_repeated(db, project, fake_cl
     dry = Publisher(None, True, tmp_path / "out")
     stats = run_changes(cfg, db, FakeJira([VPN_ISSUE, other]), ClaudeCLI(db, runner=fake_claude),
                         fake_encoder, dry, 1)
-    assert stats["suggestions"] == 1 and stats["repeated"] == 1
+    assert stats["discrepancies"] == 1 and stats["repeated"] == 1
     assert db.one("SELECT COUNT(*) AS n FROM suggestions")["n"] == 1
 
 
@@ -245,3 +257,84 @@ def test_historical_and_obsolete_pages_get_no_suggestions(db, project):
                "confidence, classified_at) VALUES('4', ?, '1', 'llm', 'obsolete', 0.9, 'now')",
                (page["content_hash"],))
     assert [p["id"] for p in target_pages(db, cfg)] == ["1", "2"]
+
+
+
+def test_since_date_and_comments(db, project, fake_claude, fake_encoder, tmp_path):
+    cfg = setup(db, project)
+    now = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)
+    stats = {"fetched": 0, "new_issues": 0}
+    cfg.data["jira"]["since"] = "2026-01-01"
+    jira = FakeJira([VPN_ISSUE])
+    fetch_issues(cfg, db, jira, 1, stats, now=now)
+    assert jira.calls[-1][2] == "2025/12/31 00:00"           # jira.since on the first run
+    fetch_issues(cfg, db, jira, 2, stats, now=now)
+    assert jira.calls[-1][2] == "2026/10/26 12:00"           # then the cursor
+    cfg.data["jira"]["since_override"] = "2026-03-01"
+    fetch_issues(cfg, db, jira, 3, stats, now=now)
+    assert jira.calls[-1][2] == "2026/02/28 00:00"           # --since re-scans
+    assert stats["new_issues"] == 1                           # nothing new to process
+
+    jira.comment_map = {"CDP-1": ["Bob, 2026-10-25: Finalement le portail est vpn3.example.com"]}
+    fake_claude.answer = answer
+    run_changes(cfg, db, jira, ClaudeCLI(db, runner=fake_claude), fake_encoder,
+                Publisher(None, True, tmp_path / "out"), 4)
+    prompt = fake_claude.calls[0]["input"]
+    assert "Comments (most recent first):" in prompt and "vpn3.example.com" in prompt
+    assert json.loads(db.one("SELECT data_json FROM jira_issues")["data_json"])["comments_loaded"]
+
+
+def test_issue_text_caps_comments():
+    i = issue("X-1", "s")
+    i.comments = ["a" * 2000, "b" * 2000, "c" * 10]
+    text = i.text(max_comment_chars=3000)
+    assert "a" * 2000 in text and "b" not in text and "[2 older comment(s) not shown]" in text
+
+
+def test_discrepancy_without_proposed_text_is_still_reported(db, project, fake_claude,
+                                                             fake_encoder, tmp_path):
+    cfg = setup(db, project)
+    fake_claude.answer = lambda prompt: {"excerpts": [item(proposed="")]}
+    dry = Publisher(None, True, tmp_path / "out")
+    stats = run_changes(cfg, db, FakeJira([VPN_ISSUE]), ClaudeCLI(db, runner=fake_claude),
+                        fake_encoder, dry, 1)
+    assert stats["discrepancies"] == 1 and stats["comments"] == 1
+    html = next((tmp_path / "out").rglob("*.storage.html")).read_text()
+    assert "The page says:" in html and "The Jira issue says:" in html
+    assert "does not give enough detail" in html
+    md = render_markdown(build_report_data(cfg, db))
+    assert "_to be written by the owner_" in md and "vpn2.example.com" in md
+
+
+def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+    from dochealth.db import Database
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE suggestions (id INTEGER PRIMARY KEY, fingerprint TEXT UNIQUE, "
+                 "issue_key TEXT, page_id TEXT, confidence REAL, similarity REAL, "
+                 "current_text TEXT, proposed_text TEXT, explanation TEXT, status TEXT, "
+                 "comment_id TEXT, location TEXT, created_run INTEGER, last_run INTEGER, "
+                 "posted_at TEXT)")
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    cols = {r["name"] for r in db.query("PRAGMA table_info(suggestions)")}
+    assert "ticket_text" in cols
+    db.close()
+
+
+@responses.activate
+def test_jira_comments_pagination():
+    body = {"type": "doc", "content": [{"type": "paragraph", "content": [
+        {"type": "text", "text": "Fait"}]}]}
+    responses.get(f"{SITE}/rest/api/3/issue/CDP-1/comment", json={
+        "comments": [{"author": {"displayName": "Bob"}, "created": "2026-10-25T10:00:00.000+0200",
+                      "body": body}], "total": 2})
+    responses.get(f"{SITE}/rest/api/3/issue/CDP-1/comment", json={
+        "comments": [{"author": {"displayName": "Eve"}, "created": "2026-10-20T10:00:00.000+0200",
+                      "body": body}], "total": 2})
+    jira = Jira(AtlassianHTTP(SITE, "e", "t", sleep=lambda s: None))
+    assert jira.comments("CDP-1") == ["Bob, 2026-10-25: Fait", "Eve, 2026-10-20: Fait"]
+    assert "startAt=1" in responses.calls[1].request.url
+    assert "orderBy=-created" in responses.calls[0].request.url

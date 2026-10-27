@@ -6,13 +6,12 @@ import json
 from dataclasses import dataclass, field
 from datetime import date
 
-from ..config import Config
+from ..config import REPORT_TITLE, Config
 from ..db import Database
 from ..llm.schemas import TRIAGE_CATEGORIES
 from ..phases.triage import analytics_available, current_candidates, pending_count
 from ..llm.prompts import load_prompt
 
-REPORT_TITLE = "Documentation Health Report – {date}"
 
 
 @dataclass
@@ -68,6 +67,7 @@ class ChangeRow:
     status: str          # posted | dry_run | low_confidence | outdated | new (deferred)
     location: str        # comment URL or local dry-run file
     current_text: str
+    ticket_text: str
     proposed_text: str
     explanation: str
 
@@ -96,9 +96,19 @@ class ReportData:
     duplicates: list[DuplicateCluster] | None = None   # None = phase never run
     duplicates_pending: int = 0
     duplicates_distinct: int = 0     # clusters judged related_but_distinct (not listed)
+    page_conflicts: list[Conflict] | None = None   # section-level, None = never run
+    page_conflicts_pending: int = 0
     changes: list[ChangeRow] | None = None   # None = phase never run
     changes_summary: ChangesSummary = field(default_factory=ChangesSummary)
     run_stats: dict = field(default_factory=dict)
+
+    @property
+    def contradictions(self) -> int | None:
+        """Contradictions inside duplicate groups plus between page sections."""
+        if self.duplicates is None and self.page_conflicts is None:
+            return None
+        return (sum(len(c.conflicts) for c in self.duplicates or [])
+                + len(self.page_conflicts or []))
 
 
 def owner_name(db: Database, owner_id: str | None, last_modifier_id: str | None) -> str:
@@ -126,7 +136,8 @@ def collect_run_stats(db: Database, current_run_id: int | None, current: dict | 
         agg["errors"] += len(s.get("errors") or []) + (s.get("triage") or {}).get("errors", 0)
         agg["errors"] += (s.get("duplicates") or {}).get("errors", 0)
         agg["errors"] += (s.get("changes") or {}).get("errors", 0)
-        for phase in ("triage", "duplicates", "changes"):
+        agg["errors"] += (s.get("conflicts") or {}).get("errors", 0)
+        for phase in ("triage", "duplicates", "conflicts", "changes"):
             stopped = (s.get(phase) or {}).get("stopped")
             if stopped:
                 agg["stopped"].append(f"{phase}: {stopped}")
@@ -156,6 +167,7 @@ def build_report_data(cfg: Config, db: Database, current_run_id: int | None = No
 
     duplicates, dup_pending, dup_distinct = collect_duplicates(db)
     changes, changes_summary = collect_changes(db)
+    page_conflicts, page_conflicts_pending = collect_page_conflicts(db)
     return ReportData(
         title=REPORT_TITLE.format(date=today.isoformat()),
         report_date=today.isoformat(),
@@ -170,6 +182,8 @@ def build_report_data(cfg: Config, db: Database, current_run_id: int | None = No
         duplicates=duplicates,
         duplicates_pending=dup_pending,
         duplicates_distinct=dup_distinct,
+        page_conflicts=page_conflicts,
+        page_conflicts_pending=page_conflicts_pending,
         changes=changes,
         changes_summary=changes_summary,
         run_stats=collect_run_stats(db, current_run_id, current_stats),
@@ -245,7 +259,25 @@ def collect_changes(db: Database) -> tuple[list[ChangeRow] | None, ChangesSummar
             issue_key=s["issue_key"], issue_url=issue.get("url", ""),
             issue_summary=issue.get("summary", ""), page=page_ref(db, s["page_id"]),
             confidence=s["confidence"], status=s["status"], location=s["location"] or "",
-            current_text=s["current_text"], proposed_text=s["proposed_text"],
+            current_text=s["current_text"], ticket_text=s["ticket_text"] or "",
+            proposed_text=s["proposed_text"],
             explanation=s["explanation"] or ""))
     rows.sort(key=lambda r: (CHANGE_STATUS_ORDER.get(r.status, 9), -r.confidence))
     return rows, summary
+
+
+def collect_page_conflicts(db: Database) -> tuple[list[Conflict] | None, int]:
+    """Section-level contradictions found by the latest conflicts run."""
+    run_id = db.get_meta("conflicts_run_id")
+    if run_id is None:
+        return None, 0
+    out, pending = [], 0
+    for r in db.query("SELECT * FROM passage_pairs WHERE last_seen_run = ? "
+                      "ORDER BY similarity DESC", (int(run_id),)):
+        if r["status"] != "analyzed" or not r["result_json"]:
+            pending += 1
+            continue
+        a, b = page_ref(db, r["page_a"]), page_ref(db, r["page_b"])
+        out += [Conflict(a, c["statement_a"], b, c["statement_b"], c["explanation"])
+                for c in json.loads(r["result_json"])["conflicts"]]
+    return out, pending
