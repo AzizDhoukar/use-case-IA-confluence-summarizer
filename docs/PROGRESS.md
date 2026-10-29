@@ -15,7 +15,7 @@
   (`phases/conflicts.py`, runs with `duplicates`). 74 tests pass. Real dry run on the personal
   space only: 213 CDP issues since 2026-09-01 -> 61 after rules -> 6 analyzed (cap), all
   unrelated; duplicates found a real contradiction between the two ngrok pages (.env
-  variables). Awaiting user approval; the user runs it on CDP themselves.
+  variables). Accepted by user after testing on CDP (2026-10-29); merged into main.
 - **Testing rule (user, 2026-10-27): real runs by Claude only on the personal space
   `~7120202e66b1f59d6249ea8d6ed85d67c677b5`; tests on team spaces are done by the user.**
 - The tool ignores its own report pages (title "Documentation Health Report – ...") in triage,
@@ -111,3 +111,4 @@
   Report: category order + definitions.
 - 2026-10-27: Phase 3 reworked (since date, comments, discrepancies, alerts) + section-level
   page contradictions; own report pages excluded. Real tests restricted to the personal space.
+- 2026-10-29: Phase 3 approved by user after testing on CDP; merged into main.
